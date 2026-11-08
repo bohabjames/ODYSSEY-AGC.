@@ -8,6 +8,9 @@ NormalizeSourceName.c ${PROJECT_SOURCE_DIR}/Tools/checkdec.c)
 add_library(libyaAGC OBJECT ${_libagc_src})
 # used by targets in other directories
 
+# ODYSSEY validation and future host targets stay separate from the normal yaAGC target.
+add_subdirectory(odyssey)
+
 if(NOT (Threads_FOUND AND CMAKE_USE_PTHREADS_INIT))
   return()
 endif()
