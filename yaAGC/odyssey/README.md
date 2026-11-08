@@ -26,3 +26,21 @@ cmake --workflow default
 ctest --test-dir build -R odyssey-embedded-baseline --output-on-failure
 ctest --test-dir build -R odyssey-embedded-demo --output-on-failure
 ```
+
+## Milestone 2: single-instance host
+
+`odyssey_engine.c` owns one `agc_t` and its bounded channel-event queue. The
+engine's existing `agc_clientdata` field routes each `ChannelOutput` callback
+to its owning host object. The initial queue holds 64 events and drops the
+newest write when full; the producer never waits. Events retain source, channel,
+value, and the AGC cycle counter. The host's `UnblockSocket` implementation is
+a no-op so embedding the engine does not alter process stdin settings.
+
+The test exercises channel `0300` (`CpuWriteIO`'s generic path in the checked-in
+engine), checks the routed event and its cycle timestamp, and verifies fixture
+and instance cleanup. It does not yet generate samples from an AGC synthesis
+program; that is the next milestone.
+
+```text
+ctest --test-dir build -R odyssey-single-host --output-on-failure
+```
