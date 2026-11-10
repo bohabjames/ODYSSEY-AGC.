@@ -64,6 +64,16 @@ engine uses them. They appear in `nm` output for that reason.
 * ODYSSEY's own state (`odyssey_computer_t`: queues, counters, sequence numbers)
   is per-instance by construction and routed by `State->agc_clientdata`.
 
+## Milestones 5 and 6 additions (host side, not engine state)
+
+* `odyssey_scheduler_t` borrows the two computers and owns only per-computer
+  capture bookkeeping.
+* `odyssey_bus_t` is deliberately the ONE shared host object: it holds
+  per-computer ports (staging, mailbox, counters) and two directional queues, is
+  accessed only from the single scheduler thread, and never gives either AGC
+  access to the other's `agc_t`. The back-pointer `odyssey_computer_t.bus` is
+  borrowed (cleared by init/destroy). No new process-wide mutable globals.
+
 ## Result
 
 All **mutable shared state that evolves during execution** is now per-instance

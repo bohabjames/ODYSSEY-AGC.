@@ -48,7 +48,7 @@ assemble() {
   echo "assembled $name -> $build/roms/$name.bin"
 }
 
-for name in SEQTEST SILENT PHASE-500 PHASE-1K PHASE-2K; do
+for name in SEQTEST SILENT PHASE-500 PHASE-1K PHASE-2K BUS-SEND BUS-RECV BUS-DUPA BUS-DUPB; do
   assemble "$name" "$name.agc" "$here/flight/tests" "$here/flight/common"
 done
 

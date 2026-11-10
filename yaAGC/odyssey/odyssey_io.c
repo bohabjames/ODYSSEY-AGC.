@@ -12,6 +12,7 @@
  * linked into the normal yaAGC target, which has its own implementations.
  */
 #include "odyssey_engine.h"
+#include "odyssey_bus.h"
 
 static odyssey_computer_t *
 owner_of (agc_t *State)
@@ -26,6 +27,11 @@ ChannelOutput (agc_t *State, int Channel, int Value)
 {
   odyssey_computer_t *c = owner_of (State);
   if (c == NULL)
+    return;
+
+  /* Bus channels (0310-0314 transmit, 0320-0325 receive/ack) are consumed by
+   * the bus when one is attached; without a bus they fall through below. */
+  if (c->bus != NULL && odyssey_bus_channel_write (c->bus, c->id, Channel, Value))
     return;
 
   switch (Channel)
@@ -69,11 +75,23 @@ ChannelOutput (agc_t *State, int Channel, int Value)
     }
 }
 
-/* No incoming data and no unprogrammed counter sequences, for now. */
+/* The engine calls this at the top of EVERY agc_engine() call, with the State
+ * that is about to execute.  This is the instance-aware point at which the
+ * host fills in that computer's own input channels: the receive mailbox
+ * (0320-0324) is republished from host-side state, so (a) a message becomes
+ * visible only because the scheduler placed it in the mailbox at a round
+ * boundary, never mid-instruction, and (b) a stray AGC write to a receive
+ * channel is overwritten before the next instruction.  Nothing is ever written
+ * into the OTHER computer's agc_t.
+ *
+ * Return 0: no unprogrammed counter increment was performed (the engine
+ * returns early from agc_engine() on non-zero). */
 int
 ChannelInput (agc_t *State)
 {
-  (void) State;
+  odyssey_computer_t *c = owner_of (State);
+  if (c != NULL && c->bus != NULL)
+    odyssey_bus_publish (c->bus, c->id, State->InputChannel);
   return 0;
 }
 

@@ -1,7 +1,7 @@
 # Upstream changes made for ODYSSEY-AGC
 
 AGENTS.md requires every changed upstream file to be documented. As of
-milestone 4 **exactly three upstream files differ from the VirtualAGC checkout**
+milestone 4 (and still true after milestones 5 and 6, which changed no upstream file) **exactly three upstream files differ from the VirtualAGC checkout**
 (`git diff --stat`: 3 files, 99 insertions, 70 deletions). Everything else under
 `yaAGC/odyssey/` is new.
 
@@ -46,6 +46,13 @@ by the tests but was compile-checked with `-DGYRO_TIMING_SIMULATED`.
 
 The full upstream CMake build (`cmake --build`, all targets available without
 SDL2/wxWidgets) succeeds with the modified files.
+
+## Milestones 5 and 6: no upstream change
+
+The dual scheduler and the bus use only existing engine hooks. `ChannelInput()`
+(called at the top of every `agc_engine()` call) is now used by ODYSSEY to
+republish each computer's own receive mailbox; `ReadIO()`/`WriteIO()` are
+unchanged. See `BUS-PROTOCOL.md`.
 
 ## Link-time interposition (no upstream edit needed)
 

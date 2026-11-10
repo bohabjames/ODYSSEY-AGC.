@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "odyssey_engine.h"
+#include "odyssey_bus.h"
 
 /* Bring the AGC and host-side state to power-on values, keeping the ROM path
  * and the queue allocation.  Used by init() and reset(). */
@@ -89,9 +90,14 @@ odyssey_computer_step (odyssey_computer_t *c, uint32_t budget)
 int
 odyssey_computer_reset (odyssey_computer_t *c)
 {
+  int rc;
+
   if (c == NULL || !c->initialized)
     return -1;
-  return power_on (c);
+  rc = power_on (c);
+  if (rc == 0 && c->bus != NULL)
+    odyssey_bus_reset_computer (c->bus, c->id);   /* resynchronise this computer only */
+  return rc;
 }
 
 void
@@ -102,4 +108,5 @@ odyssey_computer_destroy (odyssey_computer_t *c)
   ody_queue_destroy (&c->samples);
   memset (&c->agc, 0, sizeof c->agc);
   c->initialized = 0;
+  c->bus = NULL;
 }

@@ -30,6 +30,8 @@
 #include "odyssey_config.h"
 #include "odyssey_audio.h"
 
+struct odyssey_bus;   /* odyssey_bus.h */
+
 typedef struct odyssey_computer
 {
   agc_t agc;                       /* official engine state; keep first       */
@@ -53,6 +55,11 @@ typedef struct odyssey_computer
    * restarted -- see docs/AGC-PROGRAMMING-RULES.md. */
   uint64_t alarm_restarts;
   uint16_t last_alarm_bits;        /* channel 077 value of the latest alarm   */
+
+  /* Virtual bus (milestone 6).  Borrowed, NOT owned; NULL = no bus attached
+   * (bus channels then behave like any other unhandled channel).  Set by
+   * odyssey_scheduler_attach_bus(); cleared by init() and destroy(). */
+  struct odyssey_bus *bus;
 
   uint64_t cycles_executed;        /* engine calls made through step()        */
 } odyssey_computer_t;

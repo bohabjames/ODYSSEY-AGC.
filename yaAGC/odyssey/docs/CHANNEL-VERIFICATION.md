@@ -13,8 +13,9 @@ Apollo channel definition.**
 |---|---|---|
 | `0300` | `ODY_CH_AUDIO_SAMPLE` | **implemented**: one 15-bit audio word per write |
 | `0301` | `ODY_CH_AUDIO_CONTROL` | **implemented minimally**: latched value + write counter, no behaviour yet |
-| `0310`-`0314` | bus transmit (type, seq, data0, data1, commit) | reserved, **not implemented** (milestone 6) |
-| `0320`-`0325` | bus receive (status, type, seq, data0, data1, ack) | reserved, **not implemented** (milestone 6) |
+| `0310`-`0314` | bus transmit (type, seq, data0, data1, commit) | **implemented** (milestone 6), see `BUS-PROTOCOL.md` |
+| `0320`-`0324` | bus receive (status, type, seq, data0, data1), host -> AGC input channels | **implemented** (milestone 6); read-only for the AGC |
+| `0325` | bus receive acknowledge, AGC -> host | **implemented** (milestone 6) |
 
 ## Checks performed against the source
 
@@ -49,10 +50,22 @@ Apollo channel definition.**
 * All other unhandled writes are counted in `other_channel_writes`; the latest
   channel/value are in `last_other_channel` / `last_other_value`.
 
-## Unverified / for later
+## Verified in milestone 6
 
-* Whether `READ` of `0320`-`0325` behaves as intended depends on the engine's
-  `ReadIO()` path and on how `InputChannel[]` is populated; this must be tested
-  when the bus is implemented (milestone 6). **Not yet verified.**
-* The AGC address of `0301`'s intended semantics (mute/gain/flags) is undefined;
-  nothing depends on it yet.
+* `READ` of an ordinary channel returns `State->InputChannel[Address]`
+  (`ReadIO()`, `agc_engine.c`), so the bus publishes 0320-0324 there.
+* The engine calls `ChannelInput(State)` at the top of every `agc_engine()` call;
+  that is where each computer's own mailbox is copied into its own
+  `InputChannel[]`. Evidence: `tests/test_bus.c` (hook tests) and the BUS-* ROMs
+  reading the fields with real `READ` instructions (all fields correct, both
+  directions, including the 077777 -> 0 sequence wrap).
+* **Hazard:** `WriteIO()` also stores every AGC write into `InputChannel[]`, so
+  an AGC `WRITE` to 0320-0324 would clobber the mailbox. Republishing every
+  engine call restores it before the next instruction; the write is counted as
+  `rx_write_violations`. Tested by corrupting the array and stepping once.
+* No conflict: the engine references no channel numbered 0200 or above.
+
+## Still open
+
+* The intended semantics of `0301` (mute/gain/flags) are undefined; nothing
+  depends on it.
