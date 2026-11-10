@@ -23,14 +23,14 @@ CFLAGS  ?= -O2 -g
 ODYFLAGS := -std=gnu99 -Wall -Wextra -I$(UP) -I. $(SAN)
 UPFLAGS  := -std=gnu99 -w -I$(UP) $(SAN)
 
-ODY_SRCS := odyssey_engine.c odyssey_io.c odyssey_audio.c
+ODY_SRCS := odyssey_engine.c odyssey_io.c odyssey_audio.c odyssey_capture.c odyssey_scheduler.c
 UP_SRCS  := $(UP)/agc_engine.c $(UP)/agc_engine_init.c $(UP)/rfopen.c
 
 ODY_OBJS := $(patsubst %.c,$(BUILD)/%.o,$(ODY_SRCS))
 UP_OBJS  := $(patsubst $(UP)/%.c,$(BUILD)/up_%.o,$(UP_SRCS))
 
 .PHONY: all roms test asan clean
-all: $(BUILD)/odyssey-agc $(BUILD)/test_unit
+all: $(BUILD)/odyssey-agc $(BUILD)/test_unit $(BUILD)/test_sched
 
 $(BUILD):
 	mkdir -p $(BUILD)
@@ -51,6 +51,12 @@ $(BUILD)/test_unit.o: tests/test_unit.c | $(BUILD)
 	$(CC) $(CFLAGS) $(ODYFLAGS) -c $< -o $@
 
 $(BUILD)/test_unit: $(BUILD)/test_unit.o $(ODY_OBJS) $(UP_OBJS)
+	$(CC) $(SAN) -o $@ $^ -lm
+
+$(BUILD)/test_sched.o: tests/test_sched.c | $(BUILD)
+	$(CC) $(CFLAGS) $(ODYFLAGS) -c $< -o $@
+
+$(BUILD)/test_sched: $(BUILD)/test_sched.o $(ODY_OBJS) $(UP_OBJS)
 	$(CC) $(SAN) -o $@ $^ -lm
 
 roms:

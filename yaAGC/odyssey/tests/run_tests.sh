@@ -34,6 +34,7 @@ run() { # run ROM CYCLES CSV [extra args]  -> stats in $tmp/<csvbase>.stats
 
 echo "== unit tests =="
 check "unit tests" "$build/test_unit" "$roms"
+check "milestone 5 scheduler tests (test_sched)" "$build/test_sched" "$roms"
 
 echo "== milestone 2: capture path (SEQTEST, 7 AGC-seconds) =="
 run SEQTEST 600000 "$tmp/seq.csv"
@@ -99,6 +100,39 @@ eq "dropped counter == pushed shortfall" "$(stat $s queue_pushed)" 65536
 eq "retained samples are the OLDEST, in order" \
    "$(python3 tests/oracle.py phase "$tmp/ovf.csv" 00100 | tail -1)" \
    "phase: 65536 samples checked, 0 mismatches"
+
+echo "== milestone 5: dual execution via the CLI (CMC=PHASE-500, LGC=PHASE-1K) =="
+dual() { # dual SLICE CYCLES TAG [cmc rom] [lgc rom]
+  sl=$1; cy=$2; tag=$3; cr=${4:-PHASE-500}; lr=${5:-PHASE-1K}
+  "$host" --cmc-rom "$roms/$cr.bin" --lgc-rom "$roms/$lr.bin" --cycles "$cy" --slice "$sl" \
+    --out-cmc "$tmp/d_${tag}_cmc.csv" --out-lgc "$tmp/d_${tag}_lgc.csv" > "$tmp/d_${tag}.stats"
+}
+run PHASE-500 300000 "$tmp/iso_cmc.csv" --slice 1000
+run PHASE-1K  300000 "$tmp/iso_lgc.csv" --slice 1000
+iso_c=$(md5sum < "$tmp/iso_cmc.csv"); iso_l=$(md5sum < "$tmp/iso_lgc.csv")
+[ "$iso_c" != "$iso_l" ] && pass "the two programs produce different streams (non-vacuous)" || fail "streams identical"
+for sl in 1 7 1000 299999; do
+  dual $sl 300000 "s$sl"
+  eq "dual --slice $sl: CMC stream equals isolated CMC run" "$(md5sum < "$tmp/d_s${sl}_cmc.csv")" "$iso_c"
+  eq "dual --slice $sl: LGC stream equals isolated LGC run" "$(md5sum < "$tmp/d_s${sl}_lgc.csv")" "$iso_l"
+  s="$tmp/d_s$sl.stats"
+  eq "dual --slice $sl: CMC cycles" "$(stat $s cmc_agc_cycles)" 300000
+  eq "dual --slice $sl: LGC cycles" "$(stat $s lgc_agc_cycles)" 300000
+  eq "dual --slice $sl: no watchdog restarts" "$(( $(stat $s cmc_alarm_restarts) + $(stat $s lgc_alarm_restarts) ))" 0
+done
+check "dual CMC stream matches independent model" python3 tests/oracle.py phase "$tmp/d_s7_cmc.csv" 00100
+check "dual LGC stream matches independent model" python3 tests/oracle.py phase "$tmp/d_s7_lgc.csv" 00100
+dual 1000 300000 again
+eq "dual run repeats identically (CMC)" "$(md5sum < "$tmp/d_again_cmc.csv")" "$iso_c"
+eq "dual run repeats identically (LGC)" "$(md5sum < "$tmp/d_again_lgc.csv")" "$iso_l"
+dual 7 600000 seq SEQTEST PHASE-2K
+eq "SEQTEST in CMC seat: exactly 8 samples" "$(stat "$tmp/d_seq.stats" cmc_samples)" 8
+check "SEQTEST in CMC seat: exact words; unaffected by the busy LGC" \
+  python3 tests/oracle.py seq "$tmp/d_seq_cmc.csv" 00000,00001,37777,40000,77777,77776,12345,65432
+eq "dual CLI: argument error exits 2 (only one ROM)" \
+  "$("$host" --cmc-rom "$roms/SEQTEST.bin" >/dev/null 2>&1; echo $?)" 2
+eq "dual CLI: bad ROM path exits 4" \
+  "$("$host" --cmc-rom /nonexistent.bin --lgc-rom "$roms/SEQTEST.bin" >/dev/null 2>&1; echo $?)" 4
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails CHECK(S) FAILED"; fi
