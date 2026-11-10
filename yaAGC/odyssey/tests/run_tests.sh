@@ -35,6 +35,7 @@ run() { # run ROM CYCLES CSV [extra args]  -> stats in $tmp/<csvbase>.stats
 echo "== unit tests =="
 check "unit tests" "$build/test_unit" "$roms"
 check "milestone 5 scheduler tests (test_sched)" "$build/test_sched" "$roms"
+check "milestone 6 bus unit + hook tests (test_bus)" "$build/test_bus" "$roms"
 
 echo "== milestone 2: capture path (SEQTEST, 7 AGC-seconds) =="
 run SEQTEST 600000 "$tmp/seq.csv"
@@ -133,6 +134,114 @@ eq "dual CLI: argument error exits 2 (only one ROM)" \
   "$("$host" --cmc-rom "$roms/SEQTEST.bin" >/dev/null 2>&1; echo $?)" 2
 eq "dual CLI: bad ROM path exits 4" \
   "$("$host" --cmc-rom /nonexistent.bin --lgc-rom "$roms/SEQTEST.bin" >/dev/null 2>&1; echo $?)" 4
+
+echo "== milestone 6: virtual bus, real AGC READ/WRITE instructions =="
+busrun() { # busrun SLICE CYCLES TAG CMCROM LGCROM [extra args]
+  sl=$1; cy=$2; tag=$3; cr=$4; lr=$5; shift 5
+  "$host" --cmc-rom "$roms/$cr.bin" --lgc-rom "$roms/$lr.bin" --bus --cycles "$cy" --slice "$sl" \
+    --out-cmc "$tmp/b_${tag}_cmc.csv" --out-lgc "$tmp/b_${tag}_lgc.csv" "$@" > "$tmp/b_${tag}.stats"
+}
+bstat() { stat "$tmp/b_$1.stats" "$2"; }
+# all per-computer reject/diagnostic counters must be zero for a clean run
+clean_bus() { # clean_bus TAG PFX
+  t=$1; p=$2; sum=0
+  for k in invalid_commits incomplete duplicates out_of_order seq_gaps invalid_acks queue_overflows dropped rx_write_violations resets ack_timeouts; do
+    sum=$(( sum + $(bstat "$t" "${p}bus_$k") ))
+  done
+  eq "$t: $p no rejects/overflows/drops/violations/resets" "$sum" 0
+}
+wordhash() { cut -d, -f3 "$1" | md5sum; }
+
+echo "-- CMC sends set A, LGC receives (actual READ instructions on 0320-0324) --"
+busrun 1000 300000 fwd BUS-SEND BUS-RECV
+eq "CMC transmitted 12 messages" "$(bstat fwd cmc_bus_tx_messages)" 12
+eq "LGC received 12 messages" "$(bstat fwd lgc_bus_rx_messages)" 12
+eq "LGC acknowledged 12 messages" "$(bstat fwd lgc_bus_acked)" 12
+eq "LGC pending 0 at end" "$(bstat fwd lgc_bus_pending)" 0
+eq "LGC reported 60 words (12 x TYPE SEQ D0 D1 ERR)" "$(bstat fwd lgc_samples)" 60
+eq "CMC received nothing" "$(bstat fwd cmc_bus_rx_messages)" 0
+eq "no watchdog restarts (CMC+LGC)" "$(( $(bstat fwd cmc_alarm_restarts) + $(bstat fwd lgc_alarm_restarts) ))" 0
+clean_bus fwd cmc_; clean_bus fwd lgc_
+check "LGC READ every field correctly (AGC compare ERR=0 and host oracle, incl. SEQ wrap 77777->0)" \
+  python3 tests/oracle.py bus "$tmp/b_fwd_lgc.csv" A
+
+echo "-- LGC sends set A, CMC receives (reverse direction) --"
+busrun 1000 300000 rev BUS-RECV BUS-SEND
+eq "LGC transmitted 12 messages" "$(bstat rev lgc_bus_tx_messages)" 12
+eq "CMC received 12 messages" "$(bstat rev cmc_bus_rx_messages)" 12
+eq "CMC acknowledged 12 messages" "$(bstat rev cmc_bus_acked)" 12
+eq "CMC reported 60 words" "$(bstat rev cmc_samples)" 60
+eq "no watchdog restarts (CMC+LGC)" "$(( $(bstat rev cmc_alarm_restarts) + $(bstat rev lgc_alarm_restarts) ))" 0
+clean_bus rev cmc_; clean_bus rev lgc_
+check "CMC READ every field correctly" python3 tests/oracle.py bus "$tmp/b_rev_cmc.csv" A
+
+echo "-- both directions simultaneously: CMC sends A / receives B; LGC sends B / receives A --"
+busrun 1000 300000 dup BUS-DUPA BUS-DUPB
+for p in cmc lgc; do
+  eq "duplex $p transmitted 12" "$(bstat dup ${p}_bus_tx_messages)" 12
+  eq "duplex $p received 12" "$(bstat dup ${p}_bus_rx_messages)" 12
+  eq "duplex $p acknowledged 12" "$(bstat dup ${p}_bus_acked)" 12
+  eq "duplex $p pending 0" "$(bstat dup ${p}_bus_pending)" 0
+  eq "duplex $p no watchdog restarts" "$(bstat dup ${p}_alarm_restarts)" 0
+  clean_bus dup ${p}_
+done
+check "duplex: CMC received set B from the LGC" python3 tests/oracle.py bus "$tmp/b_dup_cmc.csv" B
+check "duplex: LGC received set A from the CMC" python3 tests/oracle.py bus "$tmp/b_dup_lgc.csv" A
+
+echo "-- delivery only at scheduler boundaries --"
+for sl in 1000 4096; do
+  busrun $sl 300000 bnd BUS-SEND BUS-RECV
+  first=$(sed -n 2p "$tmp/b_bnd_lgc.csv" | cut -d, -f2)
+  [ "$first" -ge "$sl" ] && pass "slice $sl: first message readable only after round 1 (first report at cycle $first >= $sl)" \
+    || fail "slice $sl: message visible inside the round that committed it (cycle $first < $sl)"
+  eq "slice $sl: still all 12 received" "$(bstat bnd lgc_bus_rx_messages)" 12
+done
+# one message per round: 12 messages need at least 12 rounds after the send round
+busrun 1000 8000 few BUS-SEND BUS-RECV
+[ "$(bstat few lgc_bus_rx_messages)" -le 8 ] && pass "at most one message per round per direction (8 rounds -> $(bstat few lgc_bus_rx_messages) delivered)" \
+  || fail "more than one message delivered in a round"
+
+echo "-- determinism: identical across slice sizes (content) and across repeat runs (everything) --"
+ref_fwd=$(wordhash "$tmp/b_fwd_lgc.csv"); ref_dc=$(wordhash "$tmp/b_dup_cmc.csv"); ref_dl=$(wordhash "$tmp/b_dup_lgc.csv")
+for sl in 1 7 4096; do
+  busrun $sl 300000 f$sl BUS-SEND BUS-RECV
+  eq "slice $sl: receiver words identical to slice 1000 (SEND->RECV)" "$(wordhash "$tmp/b_f${sl}_lgc.csv")" "$ref_fwd"
+  busrun $sl 300000 d$sl BUS-DUPA BUS-DUPB
+  eq "slice $sl: duplex CMC words identical to slice 1000" "$(wordhash "$tmp/b_d${sl}_cmc.csv")" "$ref_dc"
+  eq "slice $sl: duplex LGC words identical to slice 1000" "$(wordhash "$tmp/b_d${sl}_lgc.csv")" "$ref_dl"
+  eq "slice $sl: duplex counters match (tx/rx/acked, CMC)" \
+    "$(bstat d$sl cmc_bus_tx_messages)/$(bstat d$sl cmc_bus_rx_messages)/$(bstat d$sl cmc_bus_acked)" "12/12/12"
+  eq "slice $sl: duplex counters match (tx/rx/acked, LGC)" \
+    "$(bstat d$sl lgc_bus_tx_messages)/$(bstat d$sl lgc_bus_rx_messages)/$(bstat d$sl lgc_bus_acked)" "12/12/12"
+  check "slice $sl: duplex CMC words vs oracle" python3 tests/oracle.py bus "$tmp/b_d${sl}_cmc.csv" B
+done
+busrun 1000 300000 dup2 BUS-DUPA BUS-DUPB
+eq "repeat run: CMC CSV byte-identical (incl. cycle stamps)" "$(md5sum < "$tmp/b_dup2_cmc.csv")" "$(md5sum < "$tmp/b_dup_cmc.csv")"
+eq "repeat run: LGC CSV byte-identical (incl. cycle stamps)" "$(md5sum < "$tmp/b_dup2_lgc.csv")" "$(md5sum < "$tmp/b_dup_lgc.csv")"
+eq "repeat run: all counters identical" \
+  "$(grep -v -E 'host_' "$tmp/b_dup2.stats" | md5sum)" "$(grep -v -E 'host_' "$tmp/b_dup.stats" | md5sum)"
+
+echo "-- controls --"
+# control: same ROMs, bus NOT attached
+"$host" --cmc-rom "$roms/BUS-SEND.bin" --lgc-rom "$roms/BUS-RECV.bin" --cycles 300000 --slice 1000 \
+   --out-cmc "$tmp/nb_cmc.csv" --out-lgc "$tmp/nb_lgc.csv" > "$tmp/nb.stats"
+eq "no bus attached: the receiver gets no messages (0 samples)" "$(stat "$tmp/nb.stats" lgc_samples)" 0
+gt "no bus attached: sender's bus writes fall through to the unhandled-channel counter" "$(stat "$tmp/nb.stats" cmc_other_channel_writes)" 50
+eq "no bus attached: no watchdog restarts" "$(( $(stat "$tmp/nb.stats" cmc_alarm_restarts) + $(stat "$tmp/nb.stats" lgc_alarm_restarts) ))" 0
+busrun 1000 300000 rr BUS-RECV BUS-RECV
+eq "two receivers, no sender: nothing received" "$(bstat rr cmc_bus_rx_messages)$(bstat rr lgc_bus_rx_messages)" "00"
+eq "two receivers, no sender: no reports" "$(( $(bstat rr cmc_samples) + $(bstat rr lgc_samples) ))" 0
+eq "two receivers: polling READ loops are watchdog-safe" "$(( $(bstat rr cmc_alarm_restarts) + $(bstat rr lgc_alarm_restarts) ))" 0
+
+echo "-- missing acknowledgement (two senders, nobody ever acknowledges) --"
+busrun 1000 300000 ss BUS-SEND BUS-SEND --ack-timeout 5
+for p in cmc lgc; do
+  eq "$p: exactly one message reached the mailbox" "$(bstat ss ${p}_bus_rx_messages)" 1
+  eq "$p: never acknowledged" "$(bstat ss ${p}_bus_acked)" 0
+  eq "$p: 12 still pending (mailbox + 11 queued), none lost" "$(bstat ss ${p}_bus_pending)" 12
+  eq "$p: ack timeout reported once" "$(bstat ss ${p}_bus_ack_timeouts)" 1
+  gt "$p: ack wait grew" "$(bstat ss ${p}_bus_max_ack_wait_rounds)" 100
+done
 
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails CHECK(S) FAILED"; fi

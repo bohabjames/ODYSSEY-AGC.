@@ -15,7 +15,7 @@
  *   2. step LGC for `budget` engine calls
  *   3. drain CMC audio queue  (-> capture stats / CSV)
  *   4. drain LGC audio queue
- *   5. BOUNDARY: bus delivery (milestone 6; a no-op until a bus is attached)
+ *   5. BOUNDARY: odyssey_bus_deliver() (does nothing if no bus is attached)
  *   6. diagnostics bookkeeping (round counter)
  *
  *   Whatever an AGC emits during step 1 or 2 can only become visible to the
@@ -32,11 +32,13 @@
 #include <stdio.h>
 #include "odyssey_engine.h"
 #include "odyssey_capture.h"
+#include "odyssey_bus.h"
 
 typedef struct odyssey_scheduler
 {
   odyssey_computer_t *computer[ODY_MAX_COMPUTERS];   /* borrowed, not owned */
   ody_capture_t capture[ODY_MAX_COMPUTERS];
+  odyssey_bus_t *bus;          /* borrowed; NULL = no bus                    */
   uint32_t slice;              /* engine calls per computer per round        */
   uint64_t rounds;             /* completed rounds                           */
 } odyssey_scheduler_t;
@@ -47,6 +49,10 @@ int  odyssey_scheduler_init (odyssey_scheduler_t *s, odyssey_computer_t *cmc,
 
 /* Optional CSV log for one computer's samples (stream not owned). */
 void odyssey_scheduler_set_csv (odyssey_scheduler_t *s, int id, FILE *csv);
+
+/* Attach a bus (borrowed): both computers' bus pointers are set and delivery
+ * runs at step 5 of every round.  Call after both computers are initialised. */
+void odyssey_scheduler_attach_bus (odyssey_scheduler_t *s, odyssey_bus_t *bus);
 
 /* Execute one round with `budget` engine calls per computer. */
 void odyssey_scheduler_round (odyssey_scheduler_t *s, uint32_t budget);

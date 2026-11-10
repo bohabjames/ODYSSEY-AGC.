@@ -32,6 +32,17 @@ odyssey_scheduler_set_csv (odyssey_scheduler_t *s, int id, FILE *csv)
 }
 
 void
+odyssey_scheduler_attach_bus (odyssey_scheduler_t *s, odyssey_bus_t *bus)
+{
+  int id;
+  if (s == NULL)
+    return;
+  s->bus = bus;
+  for (id = 0; id < ODY_MAX_COMPUTERS; id++)
+    s->computer[id]->bus = bus;
+}
+
+void
 odyssey_scheduler_round (odyssey_scheduler_t *s, uint32_t budget)
 {
   int id;
@@ -42,7 +53,9 @@ odyssey_scheduler_round (odyssey_scheduler_t *s, uint32_t budget)
   /* 3-4: drain audio */
   for (id = 0; id < ODY_MAX_COMPUTERS; id++)
     ody_capture_drain (&s->capture[id], s->computer[id]);
-  /* 5: bus delivery boundary (milestone 6; nothing attached yet) */
+  /* 5: bus delivery boundary */
+  if (s->bus != NULL)
+    odyssey_bus_deliver (s->bus);
   /* 6: bookkeeping */
   s->rounds++;
 }

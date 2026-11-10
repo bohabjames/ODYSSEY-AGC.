@@ -44,6 +44,13 @@
  * Computer identities.  The host routes by instance, so both computers may
  * use the same logical channel numbers.
  * ---------------------------------------------------------------------- */
+/* ---- Virtual bus parameters (milestone 6; ODYSSEY extension) ------------- */
+#define ODY_BUS_QUEUE_CAPACITY    256u    /* complete messages per direction; power of two */
+#define ODY_BUS_STATUS_VALID      01      /* ch 0320 bit 1: a message is in the mailbox     */
+#define ODY_BUS_STATUS_OVERFLOW   02      /* ch 0320 bit 2: sticky, a message for this
+                                             computer was dropped (queue full)             */
+#define ODY_BUS_SEQ_MASK          077777  /* sequence numbers are 15 bits, wrap 077777->0  */
+
 #define ODY_COMPUTER_CMC  0     /* Comanche-derived command-module computer */
 #define ODY_COMPUTER_LGC  1     /* Luminary-derived lunar-module computer   */
 #define ODY_MAX_COMPUTERS 2
