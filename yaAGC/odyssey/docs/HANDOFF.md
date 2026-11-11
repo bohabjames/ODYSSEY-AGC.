@@ -77,6 +77,8 @@ republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
 
 ## Next steps (M7, then M8)
 
+A concrete M7 plan with gates and controls is in `M7-PLAN.md` (plan only; no M7 code yet).
+
 1. M7: define message TYPE semantics and payloads (pitch/modulation/trigger),
    write the distinct CMC and LGC synthesis programs (AGC-side only), and show a
    measurable, tested effect of a bus message on the receiver's output.
