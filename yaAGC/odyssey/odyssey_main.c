@@ -10,6 +10,9 @@
  *   odyssey-agc --rom ROM.bin [--cycles N] [--slice N] [--out samples.csv]
  *   odyssey-agc --cmc-rom CMC.bin --lgc-rom LGC.bin [--cycles N] [--slice N]
  *               [--out-cmc cmc.csv] [--out-lgc lgc.csv] [--bus] [--ack-timeout N]
+ *   --status F / --status-cmc F / --status-lgc F  log channel-0301 words as CSV
+ *             (seq,cycle,word_octal); the host only records them (M7).
+ *   --bus-log F  with --bus: log every committed/delivered/acked message (CSV).
  *   --bus attaches the virtual spacecraft bus (milestone 6) and prints
  *   per-computer bus counters ("cmc_bus_*" / "lgc_bus_*", "bus_*").
  *
@@ -127,6 +130,7 @@ main (int argc, char **argv)
 {
   const char *rom = NULL, *cmc_rom = NULL, *lgc_rom = NULL;
   const char *out = NULL, *out_cmc = NULL, *out_lgc = NULL;
+  const char *st_single = NULL, *st_cmc = NULL, *st_lgc = NULL, *bus_log_path = NULL;
   uint64_t total = 1000000;
   uint32_t slice = ODY_DEFAULT_SLICE_CYCLES;
   int i, rc, dual, use_bus = 0;
@@ -150,6 +154,14 @@ main (int argc, char **argv)
         out_cmc = argv[++i];
       else if (!strcmp (argv[i], "--out-lgc") && i + 1 < argc)
         out_lgc = argv[++i];
+      else if (!strcmp (argv[i], "--status") && i + 1 < argc)
+        st_single = argv[++i];
+      else if (!strcmp (argv[i], "--status-cmc") && i + 1 < argc)
+        st_cmc = argv[++i];
+      else if (!strcmp (argv[i], "--status-lgc") && i + 1 < argc)
+        st_lgc = argv[++i];
+      else if (!strcmp (argv[i], "--bus-log") && i + 1 < argc)
+        bus_log_path = argv[++i];
       else if (!strcmp (argv[i], "--bus"))
         use_bus = 1;
       else if (!strcmp (argv[i], "--ack-timeout") && i + 1 < argc)
@@ -163,7 +175,9 @@ main (int argc, char **argv)
   dual = (cmc_rom != NULL || lgc_rom != NULL);
   if (slice == 0 || (dual && (cmc_rom == NULL || lgc_rom == NULL || rom != NULL ||
                               out != NULL)) ||
-      (!dual && (rom == NULL || out_cmc != NULL || out_lgc != NULL || use_bus)))
+      (!dual && (rom == NULL || out_cmc != NULL || out_lgc != NULL || use_bus ||
+                 st_cmc != NULL || st_lgc != NULL || bus_log_path != NULL)) ||
+      (dual && st_single != NULL) || (bus_log_path != NULL && !use_bus))
     {
       usage (argv[0]);
       return 2;
@@ -194,6 +208,14 @@ main (int argc, char **argv)
           return 5;
         }
       ody_capture_init (&st, csv);
+      if (st_single != NULL)
+        {
+          st.status_csv = fopen (st_single, "w");
+          if (st.status_csv == NULL)
+            fprintf (stderr, "cannot open '%s' for writing\n", st_single);
+          else
+            fprintf (st.status_csv, "seq,cycle,word_octal\n");
+        }
       t0 = now_seconds ();
       while (done < total)
         {
@@ -203,8 +225,11 @@ main (int argc, char **argv)
         }
       t1 = now_seconds ();
       print_stats ("", rom, c, &st, slice, t1 - t0);
+      printf ("status_words=%" PRIu64 "\n", st.status_words);
       if (csv != NULL)
         fclose (csv);
+      if (st.status_csv != NULL)
+        fclose (st.status_csv);
       odyssey_computer_destroy (c);
       free (c);
       return 0;
@@ -216,7 +241,7 @@ main (int argc, char **argv)
       odyssey_computer_t *lgc = (odyssey_computer_t *) malloc (sizeof *lgc);
       odyssey_scheduler_t sched;
       odyssey_bus_t *bus = use_bus ? (odyssey_bus_t *) calloc (1, sizeof *bus) : NULL;
-      FILE *fc = NULL, *fl = NULL;
+      FILE *fc = NULL, *fl = NULL, *fsc = NULL, *fsl = NULL, *flog = NULL;
       double t0, t1;
       int status = 0;
 
@@ -250,9 +275,20 @@ main (int argc, char **argv)
         {
           odyssey_scheduler_set_csv (&sched, ODY_COMPUTER_CMC, fc);
           odyssey_scheduler_set_csv (&sched, ODY_COMPUTER_LGC, fl);
+          if (st_cmc != NULL && (fsc = fopen (st_cmc, "w")) != NULL)
+            fprintf (fsc, "seq,cycle,word_octal\n");
+          if (st_lgc != NULL && (fsl = fopen (st_lgc, "w")) != NULL)
+            fprintf (fsl, "seq,cycle,word_octal\n");
+          odyssey_scheduler_set_status_csv (&sched, ODY_COMPUTER_CMC, fsc);
+          odyssey_scheduler_set_status_csv (&sched, ODY_COMPUTER_LGC, fsl);
           if (bus != NULL)
             {
               odyssey_bus_init (bus);
+              if (bus_log_path != NULL && (flog = fopen (bus_log_path, "w")) != NULL)
+                {
+                  fprintf (flog, "event,round,who,a,b,c,d\n");
+                  bus->log = flog;
+                }
               bus->ack_timeout_rounds = ack_timeout;
               odyssey_scheduler_attach_bus (&sched, bus);
             }
@@ -264,6 +300,8 @@ main (int argc, char **argv)
           print_stats ("lgc_", lgc_rom, lgc, &sched.capture[ODY_COMPUTER_LGC],
                        slice, t1 - t0);
           printf ("rounds=%" PRIu64 "\n", sched.rounds);
+          printf ("cmc_status_words=%" PRIu64 "\n", sched.capture[ODY_COMPUTER_CMC].status_words);
+          printf ("lgc_status_words=%" PRIu64 "\n", sched.capture[ODY_COMPUTER_LGC].status_words);
           if (bus != NULL)
             {
               print_bus_stats ("cmc_", bus, ODY_COMPUTER_CMC);
@@ -275,6 +313,12 @@ main (int argc, char **argv)
         fclose (fc);
       if (fl != NULL)
         fclose (fl);
+      if (fsc != NULL)
+        fclose (fsc);
+      if (fsl != NULL)
+        fclose (fsl);
+      if (flog != NULL)
+        fclose (flog);
       odyssey_computer_destroy (cmc);
       odyssey_computer_destroy (lgc);
       free (cmc);

@@ -25,6 +25,9 @@ typedef struct
   int have_prev;
   uint64_t prev_cycle;
   FILE *csv;                  /* optional, not owned                          */
+  FILE *status_csv;           /* optional channel-0301 log (seq,cycle,word_octal) */
+  uint64_t status_words;      /* status words drained                         */
+  uint64_t status_seq_gaps;
 } ody_capture_t;
 
 /* csv may be NULL.  The caller owns (opens/closes) the stream and writes any
@@ -33,7 +36,7 @@ void ody_capture_init (ody_capture_t *cap, FILE *csv);
 
 /* Forget ordering history (use after odyssey_computer_reset(), which restarts
  * the computer's sequence numbers at 0).  Keeps the csv stream. */
-void ody_capture_reset (ody_capture_t *cap);
+void ody_capture_reset (ody_capture_t *cap);   /* keeps csv and status_csv */
 
 /* Pop everything currently queued in c->samples. */
 void ody_capture_drain (ody_capture_t *cap, odyssey_computer_t *c);

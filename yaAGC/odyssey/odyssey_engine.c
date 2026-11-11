@@ -24,7 +24,9 @@ power_on (odyssey_computer_t *c)
     return rc;
 
   ody_queue_clear (&c->samples);
+  ody_queue_clear (&c->status);
   c->sample_seq = 0;
+  c->status_seq = 0;
   c->audio_control = 0;
   c->audio_control_writes = 0;
   c->other_channel_writes = 0;
@@ -57,6 +59,13 @@ odyssey_computer_init (odyssey_computer_t *c, int id, const char *rom_path)
     {
       odyssey_computer_destroy (c);
       return 100 + rc;
+    }
+
+  rc = ody_queue_init (&c->status, ODY_STATUS_QUEUE_CAPACITY);
+  if (rc != 0)
+    {
+      odyssey_computer_destroy (c);
+      return 120 + rc;
     }
 
   rc = power_on (c);
@@ -106,6 +115,7 @@ odyssey_computer_destroy (odyssey_computer_t *c)
   if (c == NULL)
     return;
   ody_queue_destroy (&c->samples);
+  ody_queue_destroy (&c->status);
   memset (&c->agc, 0, sizeof c->agc);
   c->initialized = 0;
   c->bus = NULL;

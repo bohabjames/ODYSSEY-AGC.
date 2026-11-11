@@ -49,9 +49,21 @@ ChannelOutput (agc_t *State, int Channel, int Value)
         break;
       }
     case ODY_CH_AUDIO_CONTROL:
-      c->audio_control = (uint16_t) (Value & 077777);
-      c->audio_control_writes++;
-      break;
+      {
+        ody_sample_t s;
+        c->audio_control = (uint16_t) (Value & 077777);
+        c->audio_control_writes++;
+        /* Record-only event log: cycle-stamped so a test can align the word
+         * with the audio samples (a sample with a LATER cycle was computed after
+         * the AGC wrote this word).  The host does not interpret it. */
+        s.cycle = State->CycleCounter;
+        s.seq = c->status_seq++;
+        s.word = c->audio_control;
+        s.computer = (uint8_t) c->id;
+        s.reserved = 0;
+        (void) ody_queue_push (&c->status, &s);
+        break;
+      }
     case 077:
       /* Restart-monitor alarm channel.  The engine calls ChannelOutput(077,
        * alarm bits) once per hardware alarm (TC Trap, Night Watchman, Rupt

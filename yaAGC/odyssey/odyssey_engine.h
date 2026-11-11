@@ -42,6 +42,8 @@ typedef struct odyssey_computer
   ody_sample_queue_t samples;      /* AGC audio output (channel ODY_CH_AUDIO_SAMPLE) */
   uint32_t sample_seq;             /* next sequence number to assign          */
 
+  ody_sample_queue_t status;       /* cycle-stamped log of channel-0301 words (M7)    */
+  uint32_t status_seq;             /* next status sequence number                     */
   uint16_t audio_control;          /* last value written to ODY_CH_AUDIO_CONTROL */
   uint64_t audio_control_writes;
   uint64_t other_channel_writes;   /* writes to channels ODYSSEY does not handle */

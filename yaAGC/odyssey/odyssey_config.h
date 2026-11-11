@@ -25,7 +25,10 @@
  *     engine-defined channel behaviour.
  * ---------------------------------------------------------------------- */
 #define ODY_CH_AUDIO_SAMPLE   0300  /* AGC writes one 15-bit audio sample    */
-#define ODY_CH_AUDIO_CONTROL  0301  /* audio control/status (host: latched)  */
+#define ODY_CH_AUDIO_CONTROL  0301  /* AGC->host status/event word (M7): the host only
+                                       RECORDS it (latched + cycle-stamped log), it never
+                                       acts on it; see docs/SYNTH-PROTOCOL.md            */
+#define ODY_STATUS_QUEUE_CAPACITY 4096u   /* status words kept per computer (drop newest)  */
 
 /* Bus channels: reserved here, NOT yet implemented (milestone 6). */
 #define ODY_CH_BUS_TX_TYPE    0310

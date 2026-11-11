@@ -118,8 +118,8 @@ about 12 rounds, i.e. last report at cycle 12103 for slice 1000, 49251 for slice
 
 * Single thread only. No atomics; do not feed the bus from an audio thread.
 * No interrupt delivery; receivers must poll 0320.
-* Message TYPE meanings (SYNC, PITCH, ... from AGENTS.md) and payload layouts are
-  **not defined yet**; that is milestone 7.
-* 0301 (audio control) still has no defined semantics.
+* Message TYPE meanings and payloads for the synth ROMs are defined in `SYNTH-PROTOCOL.md` (M7).
+* `--bus-log FILE` (M7, host-side record only) writes `C,round,sender,type,seq,d0,d1` per accepted commit, `D,round,receiver,seq` per delivery, `K,round,receiver,seq` per ack (octal fields).
+* 0301 is a record-only status word (M7).
 * The one-message-per-round limit is deliberate (determinism); a deeper mailbox
   would raise throughput but must be specified first.

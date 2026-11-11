@@ -32,6 +32,13 @@ odyssey_scheduler_set_csv (odyssey_scheduler_t *s, int id, FILE *csv)
 }
 
 void
+odyssey_scheduler_set_status_csv (odyssey_scheduler_t *s, int id, FILE *csv)
+{
+  if (s != NULL && id >= 0 && id < ODY_MAX_COMPUTERS)
+    s->capture[id].status_csv = csv;
+}
+
+void
 odyssey_scheduler_attach_bus (odyssey_scheduler_t *s, odyssey_bus_t *bus)
 {
   int id;

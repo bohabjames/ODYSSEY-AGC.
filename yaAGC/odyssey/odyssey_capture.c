@@ -16,15 +16,28 @@ ody_capture_init (ody_capture_t *cap, FILE *csv)
 void
 ody_capture_reset (ody_capture_t *cap)
 {
-  FILE *csv = cap->csv;
+  FILE *csv = cap->csv, *status_csv = cap->status_csv;
   memset (cap, 0, sizeof *cap);
   cap->csv = csv;
+  cap->status_csv = status_csv;
 }
 
 void
 ody_capture_drain (ody_capture_t *cap, odyssey_computer_t *c)
 {
   ody_sample_t s;
+  uint32_t status_expected = (uint32_t) cap->status_words + (uint32_t) cap->status_seq_gaps;
+
+  while (ody_queue_pop (&c->status, &s))
+    {
+      if (s.seq > status_expected)
+        cap->status_seq_gaps += s.seq - status_expected;
+      status_expected = s.seq + 1;
+      cap->status_words++;
+      if (cap->status_csv != NULL)
+        fprintf (cap->status_csv, "%" PRIu32 ",%" PRIu64 ",%05o\n", s.seq, s.cycle,
+                 (unsigned) s.word);
+    }
   while (ody_queue_pop (&c->samples, &s))
     {
       if (s.seq > cap->expected_seq)

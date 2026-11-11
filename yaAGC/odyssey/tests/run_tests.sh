@@ -243,6 +243,77 @@ for p in cmc lgc; do
   gt "$p: ack wait grew" "$(bstat ss ${p}_bus_max_ack_wait_rounds)" 100
 done
 
+echo "== milestone 7: CMC/LGC synthesis programs and cross-computer influence =="
+synrun() { # synrun SLICE CYCLES TAG CMCROM LGCROM [extra args]  (with bus + logs)
+  sl=$1; cy=$2; tag=$3; cr=$4; lr=$5; shift 5
+  "$host" --cmc-rom "$roms/$cr.bin" --lgc-rom "$roms/$lr.bin" --bus --cycles "$cy" --slice "$sl" \
+    --out-cmc "$tmp/s_${tag}.cmc.csv" --out-lgc "$tmp/s_${tag}.lgc.csv" \
+    --status-cmc "$tmp/s_${tag}.cmc.st" --status-lgc "$tmp/s_${tag}.lgc.st" \
+    --bus-log "$tmp/s_${tag}.bus" "$@" > "$tmp/s_${tag}.stats"
+}
+sstat() { stat "$tmp/s_$1.stats" "$2"; }
+oracle_pair() { # oracle_pair TAG CMC_EXTRA...
+  t=$1; shift
+  check "$t: CMC stream+messages match the independent model exactly" \
+    python3 -I tests/oracle_synth.py cmc "$tmp/s_$t.cmc.csv" "$tmp/s_$t.cmc.st" "$tmp/s_$t.bus" "$@"
+  check "$t: LGC stream+messages match the independent model exactly" \
+    python3 -I tests/oracle_synth.py lgc "$tmp/s_$t.lgc.csv" "$tmp/s_$t.lgc.st" "$tmp/s_$t.bus"
+}
+clean_bus_s() { sum=0; for k in invalid_commits incomplete duplicates out_of_order seq_gaps invalid_acks queue_overflows dropped rx_write_violations resets; do
+    sum=$(( sum + $(sstat "$1" "cmc_bus_$k") + $(sstat "$1" "lgc_bus_$k") )); done
+  eq "$1: bus counters clean" "$sum" 0; }
+
+synrun 1000 1000000 base SYNTH-CMC SYNTH-LGC
+oracle_pair base
+gt "base: CMC samples produced" "$(sstat base cmc_samples)" 10000
+gt "base: LGC samples produced" "$(sstat base lgc_samples)" 10000
+gt "base: CMC received MODULATION from the LGC" "$(sstat base cmc_status_words)" 20
+gt "base: LGC received SYNC/PITCH/TRIGGER from the CMC" "$(sstat base lgc_status_words)" 100
+eq "base: no watchdog restarts (CMC+LGC)" "$(( $(sstat base cmc_alarm_restarts) + $(sstat base lgc_alarm_restarts) ))" 0
+clean_bus_s base
+
+synrun 1000 1000000 alt SYNTH-CMC-ALT SYNTH-LGC
+oracle_pair alt --note-offset 3
+eq "alt: no watchdog restarts" "$(( $(sstat alt cmc_alarm_restarts) + $(sstat alt lgc_alarm_restarts) ))" 0
+clean_bus_s alt
+
+echo "-- controls: bus off --"
+"$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --cycles 1000000 --slice 1000 \
+  --out-cmc "$tmp/s_off.cmc.csv" --out-lgc "$tmp/s_off.lgc.csv" \
+  --status-cmc "$tmp/s_off.cmc.st" --status-lgc "$tmp/s_off.lgc.st" > "$tmp/s_off.stats"
+check "bus off: CMC plays the plain note table" python3 -I tests/oracle_synth.py cmc-nobus "$tmp/s_off.cmc.csv"
+check "bus off: LGC is silent (the host adds no sound)" python3 -I tests/oracle_synth.py lgc-nobus "$tmp/s_off.lgc.csv"
+eq "bus off: no status words ever" "$(sstat off cmc_status_words)$(sstat off lgc_status_words)" "00"
+
+echo "-- cross-computer influence (cause precedes effect) --"
+check "CMC with bus is identical to bus-off until the first MODULATION is applied, then diverges" \
+  python3 -I tests/synth_influence.py prefix "$tmp/s_base.cmc.csv" "$tmp/s_base.cmc.st" "$tmp/s_off.cmc.csv"
+check "closed loop: different CMC program -> different LGC MODULATION messages" \
+  python3 -I tests/synth_influence.py moddiff "$tmp/s_base.bus" "$tmp/s_alt.bus"
+check "closed loop: different CMC program -> different CMC audio" \
+  python3 -I tests/synth_influence.py streamdiff "$tmp/s_base.cmc.csv" "$tmp/s_alt.cmc.csv"
+
+echo "-- scheduler-slice independence --"
+for sl in 1 7 4096; do
+  synrun $sl 300000 sl$sl SYNTH-CMC SYNTH-LGC
+  oracle_pair sl$sl
+  # Bus delivery is once per round, so the slice size sets message latency (documented):
+  # audio may differ between slices AFTER the first message, but never before it.
+  # N = bus-on samples stamped before the first status write; the first N samples
+  # (word AND cycle) must equal the bus-off run's first N.
+  n=$(awk -F, -v c="$(sed -n 2p "$tmp/s_sl$sl.cmc.st" | cut -d, -f2)" 'NR>1 && $2<c' "$tmp/s_sl$sl.cmc.csv" | wc -l)
+  gt "slice $sl: non-trivial pre-influence prefix" "$n" 100
+  eq "slice $sl: first $n CMC samples identical to the bus-off run (word and cycle)" \
+    "$(sed -n "2,$((n + 1))p" "$tmp/s_sl$sl.cmc.csv" | cut -d, -f1-3 | md5sum)" \
+    "$(sed -n "2,$((n + 1))p" "$tmp/s_off.cmc.csv" | cut -d, -f1-3 | md5sum)"
+done
+
+echo "-- determinism --"
+synrun 1000 1000000 base2 SYNTH-CMC SYNTH-LGC
+for f in cmc.csv lgc.csv cmc.st lgc.st bus; do
+  eq "repeat run: $f byte-identical" "$(md5sum < "$tmp/s_base2.$f")" "$(md5sum < "$tmp/s_base.$f")"
+done
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails CHECK(S) FAILED"; fi
 exit "$fails"

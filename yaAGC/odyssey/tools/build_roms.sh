@@ -52,6 +52,11 @@ for name in SEQTEST SILENT PHASE-500 PHASE-1K PHASE-2K BUS-SEND BUS-RECV BUS-DUP
   assemble "$name" "$name.agc" "$here/flight/tests" "$here/flight/common"
 done
 
+# Milestone 7 experimental synth programs (not Apollo flight software).
+assemble SYNTH-CMC CMC-SYNTH.agc "$here/flight/ComancheSynth" "$here/flight/common"
+assemble SYNTH-CMC-ALT CMC-SYNTH-ALT.agc "$here/flight/ComancheSynth" "$here/flight/common"
+assemble SYNTH-LGC LGC-SYNTH.agc "$here/flight/LuminarySynth" "$here/flight/common"
+
 # A real flight program from this repository, used by the isolation tests as a
 # second, independent workload.  The repo root is two levels above yaAGC/odyssey.
 comanche="$here/../../Comanche055"

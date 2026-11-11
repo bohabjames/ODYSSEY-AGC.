@@ -1,11 +1,11 @@
 # ODYSSEY-AGC handoff (Claude -> Codex)
 
-Branch history: M1-M4 merged to `master` (PR #1). M5-M6 are on `claude/odyssey-m5-m6`.
+Branch history: M1-M6 merged to `master` (PRs #1, #2). M7 is on `claude/odyssey-m7`.
 
 ## State
 
-Milestones 1-6 of AGENTS.md are done, each with test evidence. **Milestones 7
-(dual synthesis) and 8 (real-time audio) are NOT started.**
+Milestones 1-7 of AGENTS.md are done, each with test evidence. **Milestone 8
+(real-time audio) is NOT started.**
 
 | M | Status | Evidence |
 |---|---|---|
@@ -14,6 +14,7 @@ Milestones 1-6 of AGENTS.md are done, each with test evidence. **Milestones 7
 | 3 AGC-side synthesis (PHASE-*) | done | AGC output equals independent Python model (about 145k samples); SILENT yields 0 samples |
 | 4 state isolation | done | differential vs frozen pristine engine bit-identical; interleaved/reset/destroy isolation; controls fail on the pristine engine |
 | 5 dual execution | done | `test_sched` (70 checks) + CLI: dual output equals isolated runs at slices 1, 7, 1000, 4096, 299999; reset/destroy of one leaves the other untouched; mutation-tested |
+| 7 dual synthesis | done | `SYNTH-CMC`/`SYNTH-LGC` match an independent exact model (base and ALT); bus-off controls; identical-prefix-then-diverge causality; closed-loop base vs ALT; slices 1/7/4096; deterministic; see `SYNTH-PROTOCOL.md` |
 | 6 virtual bus | done | `test_bus` (about 422k checks incl. a 70000-message wrap lap) + BUS-* ROMs using real `READ`/`WRITE`; both directions and duplex; slice-invariant content; mutation-tested (9/9 caught) |
 
 `make test` = 172 PASS lines, 0 FAIL, plus the isolation suite. `make asan` passes.
@@ -41,6 +42,7 @@ Dual: `build/odyssey-agc --cmc-rom C.bin --lgc-rom L.bin [--bus] [--ack-timeout 
 * `BUS-PROTOCOL.md` - the bus contract, scheduler boundary, engine facts, limits
 * `AGC-PROGRAMMING-RULES.md` - watchdogs, CCS/TS/one's-complement, register
   addresses, yaYUL gotchas (read before writing any AGC assembly)
+* `SYNTH-PROTOCOL.md` - M7 programs, message semantics, verification
 * `STATE-ISOLATION-AUDIT.md`, `UPSTREAM-CHANGES.md`, `CHANNEL-VERIFICATION.md`
 
 ## Code map (yaAGC/odyssey)
@@ -67,18 +69,15 @@ republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
 * The audio ring and bus are single-thread only. M8 needs atomics (and TSan).
 * Section 3 of `STATE-ISOLATION-AUDIT.md`: debugger, coverage, DEDA, telemetry
   and socket subsystems must stay off with more than one computer.
-* `0301` audio-control semantics are undefined.
-* Bus message TYPE meanings and payload layouts are undefined (M7 work); the
-  test ROMs use opaque patterns. The receiver test ROMs report their results on
+* `0301` is a record-only status word (M7); the host never acts on it.
+* Message semantics are defined in `SYNTH-PROTOCOL.md` for the synth ROMs; the
+  M6 BUS-* test ROMs still use opaque patterns. The receiver test ROMs report their results on
   the audio channel 0300 purely so the host can capture them.
 * One message per round per direction is deliberate (determinism), so the
   scheduler slice bounds bus throughput (about 85333/slice messages per AGC-second).
 * `tests/baseline/` is a frozen copy of pristine engine files; never edit it.
 
-## Next steps (M7, then M8)
+## Next steps (M8)
 
-1. M7: define message TYPE semantics and payloads (pitch/modulation/trigger),
-   write the distinct CMC and LGC synthesis programs (AGC-side only), and show a
-   measurable, tested effect of a bus message on the receiver's output.
-2. M8: real-time audio backend behind a small interface: atomics on the sample
+1. M8: real-time audio backend behind a small interface: atomics on the sample
    ring, underrun/overrun counters, independent gain/mute/solo, mixing.

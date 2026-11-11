@@ -71,6 +71,7 @@
 #define ODYSSEY_BUS_H
 
 #include <stdint.h>
+#include <stdio.h>
 #include "odyssey_config.h"
 
 #define ODY_BUS_F_TYPE   01
@@ -142,7 +143,16 @@ typedef struct odyssey_bus
   ody_bus_queue_t q[ODY_MAX_COMPUTERS];   /* q[i]: messages SENT BY computer i */
   ody_bus_port_t port[ODY_MAX_COMPUTERS];
   uint32_t ack_timeout_rounds;            /* 0 = timeout reporting disabled   */
+  uint64_t deliveries;                    /* odyssey_bus_deliver() calls so far = round index */
+  FILE *log;                              /* optional transport log, borrowed; see below */
 } odyssey_bus_t;
+
+/* Optional bus log (diagnostics only; the bus never reads it).  One line per
+ * event, CSV, "round" = number of deliveries completed so far:
+ *   C,round,from,type,seq,data0,data1   accepted commit (queued or dropped-full)
+ *   D,round,to,seq                      message moved into a mailbox
+ *   K,round,id,seq                      matching acknowledgement
+ * Values are octal.  from/to/id: 0 = CMC, 1 = LGC. */
 
 void odyssey_bus_init (odyssey_bus_t *bus);
 

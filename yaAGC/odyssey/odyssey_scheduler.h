@@ -50,6 +50,9 @@ int  odyssey_scheduler_init (odyssey_scheduler_t *s, odyssey_computer_t *cmc,
 /* Optional CSV log for one computer's samples (stream not owned). */
 void odyssey_scheduler_set_csv (odyssey_scheduler_t *s, int id, FILE *csv);
 
+/* Optional channel-0301 status log for one computer (stream not owned). */
+void odyssey_scheduler_set_status_csv (odyssey_scheduler_t *s, int id, FILE *csv);
+
 /* Attach a bus (borrowed): both computers' bus pointers are set and delivery
  * runs at step 5 of every round.  Call after both computers are initialised. */
 void odyssey_scheduler_attach_bus (odyssey_scheduler_t *s, odyssey_bus_t *bus);

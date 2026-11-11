@@ -103,6 +103,10 @@ commit (odyssey_bus_t *bus, int id, uint16_t commit_value)
         p->st.seq_gaps += (uint64_t) (delta - 1);
     }
 
+  if (bus->log != NULL)
+    fprintf (bus->log, "C,%llu,%d,%o,%o,%o,%o\n", (unsigned long long) bus->deliveries,
+             id, (unsigned) m.type, (unsigned) m.seq, (unsigned) m.data0,
+             (unsigned) m.data1);
   /* Accepted.  Even if the queue is full the sequence number counts as sent. */
   p->tx_have_last = 1;
   p->tx_last_seq = m.seq;
@@ -159,6 +163,9 @@ odyssey_bus_channel_write (odyssey_bus_t *bus, int id, int channel, int value)
     case ODY_CH_BUS_RX_ACK:
       if (p->mb_valid && v == p->mb.seq)
         {
+          if (bus->log != NULL)
+            fprintf (bus->log, "K,%llu,%d,%o\n", (unsigned long long) bus->deliveries,
+                     id, (unsigned) p->mb.seq);
           p->mb_valid = 0;
           p->mb_age_rounds = 0;
           p->mb_timeout_flagged = 0;
@@ -198,6 +205,9 @@ odyssey_bus_deliver (odyssey_bus_t *bus)
               p->mb_age_rounds = 0;
               p->mb_timeout_flagged = 0;
               p->st.rx_messages++;
+              if (bus->log != NULL)
+                fprintf (bus->log, "D,%llu,%d,%o\n", (unsigned long long) bus->deliveries,
+                         r, (unsigned) p->mb.seq);
             }
         }
       else
@@ -213,6 +223,7 @@ odyssey_bus_deliver (odyssey_bus_t *bus)
             }
         }
     }
+  bus->deliveries++;
 }
 
 void

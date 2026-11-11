@@ -12,7 +12,7 @@ Apollo channel definition.**
 | Channel (octal) | Name | Status |
 |---|---|---|
 | `0300` | `ODY_CH_AUDIO_SAMPLE` | **implemented**: one 15-bit audio word per write |
-| `0301` | `ODY_CH_AUDIO_CONTROL` | **implemented minimally**: latched value + write counter, no behaviour yet |
+| `0301` | `ODY_CH_AUDIO_CONTROL` | **implemented** (M7): status/event word logged per write (`--status*`), record-only; semantics in `SYNTH-PROTOCOL.md` |
 | `0310`-`0314` | bus transmit (type, seq, data0, data1, commit) | **implemented** (milestone 6), see `BUS-PROTOCOL.md` |
 | `0320`-`0324` | bus receive (status, type, seq, data0, data1), host -> AGC input channels | **implemented** (milestone 6); read-only for the AGC |
 | `0325` | bus receive acknowledge, AGC -> host | **implemented** (milestone 6) |
@@ -67,5 +67,4 @@ Apollo channel definition.**
 
 ## Still open
 
-* The intended semantics of `0301` (mute/gain/flags) are undefined; nothing
-  depends on it.
+* `0301` is defined only as a record-only status word; mute/gain/flags remain undefined.
