@@ -101,7 +101,9 @@ void
 ody_offline_hook (void *ctx, uint64_t cycles)
 {
   ody_offline_t *o = ctx;
-  uint64_t due = cycles * o->rt->device_rate / o->cycles_per_second;
+  uint64_t due;
+  ody_rt_publish_watermark (o->rt, cycles);   /* timed mode: everything up to here is queued */
+  due = ody_rt_frames_ready (o->rt, cycles);
   while (o->rendered < due)
     {
       uint64_t n = due - o->rendered;

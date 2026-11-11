@@ -54,24 +54,43 @@ Verified by: code review; `tests/run_tests.sh` disassembles `ody_rt_render` and
 requires that it contains no call except the compiler's `__stack_chk_fail`
 abort path; measured render time (below).
 
-## Semantics
+## Playback timing: two modes
 
-* **Stream rate / zero-order hold.** AGC samples are mapped onto the stream at
-  `--audio-stream-rate` (default 1000 Hz) and held for the device rate (default
-  48 kHz) with an exact Q32 phase accumulator. The stream rate is a time-scale
-  choice (the AGC emits roughly 950-990 samples per AGC-second in the synth ROMs);
-  to avoid starving, choose it below the AGC's real rate or use prefill.
+* **TIMED (default, `--audio-stream-rate 0`).** Every ring slot carries the
+  sample's AGC cycle stamp. Device frame `f` plays AGC time
+  `T(f) = floor(f * 85333 / device_rate) - latency`, holding the newest sample
+  stamped `<= T`. Both computers share this one AGC clock, so there is no
+  sample-rate constant to guess and the CMC and LGC cannot drift against each
+  other. The producer publishes a per-computer **watermark** (all samples up to
+  AGC cycle W are queued; stored with release *after* the pushes). A frame whose
+  `T > W` is an underrun (the AGC has not produced that moment yet); samples
+  already delivered keep playing, the last one is held, and when the producer
+  catches up playback resumes at the correct AGC time (late samples are skipped,
+  never played late). Frames with `T < 0` (the latency lead-in) are silent and
+  not counted. At most 256 samples are consumed per frame, bounding catch-up
+  work. `--audio-latency-ms` (default 50) must exceed the scheduler's jitter:
+  measured in the sandbox with the paced scheduler, latency >= 10 ms gave zero
+  underruns for 11 ms, 93 ms and 468 ms scheduler slices; latency 0 starved
+  (the wall clock overtakes each round's watermark before the next round
+  publishes). The offline renderer renders exactly the frames whose `T <= W`
+  after each round, so offline output is deterministic and slice-independent in
+  timing.
+* **FIXED (`--audio-stream-rate N`, N > 0).** The next AGC sample is taken every
+  `device_rate/N` frames with an exact Q32 accumulator; cycle stamps are
+  ignored. Kept for compatibility and as a simple model; it needs N below the
+  AGC's real output rate (about 950-990 samples per AGC-second in the synth ROMs)
+  or prefill, otherwise the stream outruns the producer and starves.
 * **Mix:** per-channel Q15 gain (0..4.0, round-to-nearest) clamped to +-32767;
   `audible = !mute && (no channel soloed || this channel soloed)`, so **mute
   always wins over solo**; summed; Q15 master (0..4.0); saturating clip to
   +-32767 (counted in `clipped_frames`, never wraps). Mono mix is copied to
   both output channels (or one channel with `--audio-channels 1`).
-* **Underrun** = an *active*, primed channel needed its next stream sample and
-  the ring was empty. The last value is held (no click burst); every such device
+* **Underrun** (fixed mode) = an *active*, primed channel needed its next stream
+  sample and the ring was empty; (timed mode) see above. The last value is held (no click burst); every such device
   frame is counted in `underrun_frames`, each episode in `underrun_events`,
   independently for CMC and LGC. No backlog is accumulated (the stream resumes
   at its own pace, no fast-forward). An inactive channel never counts.
-* **Prefill** (`--audio-prefill N`): a channel stays silent, uncounted, until N
+* **Prefill** (`--audio-prefill N`, fixed mode only): a channel stays silent, uncounted, until N
   samples are queued; builds a latency cushion.
 * **Overrun** = the ring was full; the *newest* sample is dropped (`dropped`),
   each full episode counted in `overrun_events`.
@@ -88,8 +107,8 @@ abort path; measured render time (below).
 
 ## Test results (this sandbox)
 
-`make test`: 250 PASS / 0 FAIL (M1-M7 all still pass, isolation suite passes).
-`test_rt`: 3988 checks, 0 failures (also under ASan+UBSan and ThreadSanitizer
+`make test`: 274 PASS / 0 FAIL (M1-M7 all still pass, isolation suite passes).
+`test_rt`: 16416 checks, 0 failures (also under ASan+UBSan and ThreadSanitizer
 with gcc: `make tsan`), repeated runs stable.
 
 Required demonstrations: (1) CMC alone, (2) LGC alone, (3) both, (4) independent
@@ -106,10 +125,21 @@ samples equal the gaps exactly, pushed == consumed + queued. (10) existing tests
 
 Measured, not guaranteed: `ody_rt_render(512 frames)` mean about 4 us, worst
 about 0.1-0.8 ms in this sandbox (including under TSan, with scheduling noise);
-period budget at 48 kHz/512 is 10.7 ms. Paced real-time run: 2.0 AGC-seconds in
-2.01 s wall, 0 underruns/drops with prefill 200 at stream rate 500.
+period budget at 48 kHz/512 is 10.7 ms. Paced real-time runs: 2.0 AGC-seconds in
+2.01 s wall, 0 underruns/drops (timed, latency 50 ms; and fixed stream rate 500 with prefill 200).
 
-Mutation testing: 11 injected bugs (mute/solo, master, clipping, gain index,
+Timed mode: the WAV rendered from the real SYNTH ROMs equals an independent
+model exactly at scheduler slices 1/7/1000/4096 and latencies 0-100 ms (all gain,
+mute, solo, master, clip, mono and stereo variants); byte-identical on repeat.
+A bug found and fixed while testing it: the first version stopped consuming
+while starved, which deadlocks a producer blocked on a full ring; the callback
+now always drains samples at or below `min(T, watermark)`.
+Mutation testing of the timed path: 7 more injected bugs (latency ignored,
+starved drain, newer-than-T pops, `>=` underrun test, frames_ready off by one,
+wrong clock, frame counter not advanced) are all detected (two by hanging, so
+`test_rt` now has a watchdog alarm).
+
+Mutation testing (fixed-stream path): 11 injected bugs (mute/solo, master, clipping, gain index,
 underrun accounting, ring-full handling, overrun episodes, inactive channels,
 backlog fast-forward, prefill); all caught after one missing test (backlog) was
 added. One mutant was equivalent and discarded.
@@ -119,6 +149,8 @@ added. One mutant was equivalent and discarded.
 * ALSA backend untested; no other real-device backends (PortAudio/CoreAudio/WASAPI).
   A device whose native rate is not 48 kHz needs `--audio-rate`.
 * Resetting one computer does not flush its ring (queued samples play out).
+* Timed mode assumes a producer that publishes watermarks (the scheduler does; a
+  custom feeder must call `ody_rt_set_watermark` after its pushes).
 * Zero-order hold (no interpolation or band-limiting): audible aliasing is expected;
   that is a representation choice, not synthesis.
 * The scheduler and bus remain single-threaded; only the ring/controls are cross-thread.

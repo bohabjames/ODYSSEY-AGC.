@@ -46,7 +46,7 @@ typedef struct
   const char *wav;            /* --audio-wav: deterministic offline render     */
   const char *backend;        /* --audio-backend paced|alsa (real-time)        */
   const char *device;         /* --audio-device (alsa PCM name, or WAV path)   */
-  uint32_t rate, period, stream_rate, channels, ring, prefill;
+  uint32_t rate, period, stream_rate, channels, ring, prefill, latency_ms;
   double gain[2], master;
   int mute[2], solo[2];
   int realtime;               /* pace the scheduler to the wall clock          */
@@ -55,6 +55,7 @@ typedef struct
 typedef struct
 {
   double start;
+  ody_rt_t *rt;               /* real-time audio core or NULL */
   ody_offline_t *off;         /* offline renderer or NULL                      */
   int realtime;
 } round_ctx_t;
@@ -64,7 +65,9 @@ round_hook (void *ctx, uint64_t cycles)
 {
   round_ctx_t *r = ctx;
   if (r->off != NULL)
-    ody_offline_hook (r->off, cycles);
+    ody_offline_hook (r->off, cycles);           /* also publishes the watermark */
+  else if (r->rt != NULL)
+    ody_rt_publish_watermark (r->rt, cycles);    /* all samples up to here are queued */
   if (r->realtime)
     {
       double due = r->start + (double) cycles / (double) AGC_PER_SECOND, now = now_seconds ();
@@ -121,7 +124,10 @@ usage (const char *argv0)
            "                       implies --realtime\n"
            "  --audio-device D     alsa PCM name or paced WAV path\n"
            "  --audio-rate N (48000) --audio-period N (512) --audio-channels 1|2 (2)\n"
-           "  --audio-stream-rate N (1000)  AGC samples/s mapped onto the stream\n"
+           "  --audio-stream-rate N (0)  0 = TIMED: play every sample at its own AGC cycle\n"
+           "                       (recommended; no rate to guess).  N>0 = fixed stream of N\n"
+           "                       AGC samples/s, cycle stamps ignored\n"
+           "  --audio-latency-ms N (50)  timed mode: playback delay that absorbs scheduler jitter\n"
            "  --audio-prefill N (0) start a channel only once N samples are queued\n"
            "  --audio-ring N (16384) ring capacity per computer (power of two)\n"
            "  --gain-cmc G --gain-lgc G --master G   linear gains, 0..4 (default 1)\n"
@@ -211,7 +217,7 @@ main (int argc, char **argv)
   uint32_t slice = ODY_DEFAULT_SLICE_CYCLES;
   int i, rc, dual, use_bus = 0;
   uint32_t ack_timeout = 0;
-  audio_opts_t au = { NULL, NULL, NULL, 48000, 512, 1000, 2, 16384, 0, { 1.0, 1.0 }, 1.0, { 0, 0 }, { 0, 0 }, 0 };
+  audio_opts_t au = { NULL, NULL, NULL, 48000, 512, 0, 2, 16384, 0, 50, { 1.0, 1.0 }, 1.0, { 0, 0 }, { 0, 0 }, 0 };
 
   for (i = 1; i < argc; i++)
     {
@@ -253,6 +259,8 @@ main (int argc, char **argv)
         au.channels = (uint32_t) strtoul (argv[++i], NULL, 10);
       else if (!strcmp (argv[i], "--audio-stream-rate") && i + 1 < argc)
         au.stream_rate = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--audio-latency-ms") && i + 1 < argc)
+        au.latency_ms = (uint32_t) strtoul (argv[++i], NULL, 10);
       else if (!strcmp (argv[i], "--audio-prefill") && i + 1 < argc)
         au.prefill = (uint32_t) strtoul (argv[++i], NULL, 10);
       else if (!strcmp (argv[i], "--audio-ring") && i + 1 < argc)
@@ -363,7 +371,7 @@ main (int argc, char **argv)
       ody_wav_t wav;
       ody_offline_t off;
       ody_backend_t *be = NULL;
-      round_ctx_t rctx = { 0, NULL, 0 };
+      round_ctx_t rctx = { 0, NULL, NULL, 0 };
       int rt_ok = 0, wav_ok = 0;
 
       if (cmc == NULL || lgc == NULL || (use_bus && bus == NULL))
@@ -424,6 +432,8 @@ main (int argc, char **argv)
                 {
                   int id;
                   rt_ok = 1;
+                  rctx.rt = &rt;
+                  ody_rt_set_latency_cycles (&rt, ody_rt_latency_ms_to_cycles (au.latency_ms));
                   for (id = 0; id < 2; id++)
                     {
                       feed[id].rt = &rt;

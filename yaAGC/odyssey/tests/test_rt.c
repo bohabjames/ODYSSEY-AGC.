@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include "odyssey_rt.h"
 #include "odyssey_backend.h"
 #include <sys/stat.h>
@@ -559,6 +560,185 @@ test_render_time (void)
   ody_rt_destroy (&rt);
 }
 
+/* ---------------------------------------------------------- timed mode */
+#define MCT 85333LL
+
+static long long
+Tof (long long f, long long lat) { return f * MCT / 48000 - lat; }
+
+static void
+mk_timed (ody_rt_t *rt, uint32_t cap, int64_t lat)
+{
+  if (ody_rt_init (rt, cap, 48000, 0) != 0) { puts ("init failed"); exit (2); }
+  ody_rt_set_latency_cycles (rt, lat);
+  ody_rt_set_active (rt, 0, 1);
+  ody_rt_set_active (rt, 1, 1);
+}
+
+static void
+test_timed (void)
+{
+  ody_rt_t rt;
+  int16_t out[4096];
+  int lat, i;
+  long long f, W;
+  ody_rt_chan_stats_t st;
+
+  /* (a) every frame holds the newest sample stamped <= T, for several latencies and
+   * both computers on the same clock; watermark far ahead (no starvation). */
+  for (lat = 0; lat <= 2000; lat += 700)
+    {
+      long long cyc0[200], cyc1[200];
+      mk_timed (&rt, 256, lat);
+      for (i = 0; i < 200; i++)
+        {
+          cyc0[i] = 37 + (long long) i * 89 + (i % 5) * 3;     /* irregular spacing */
+          cyc1[i] = 11 + (long long) i * 97 + (i % 7);
+          ody_rt_push_timed (&rt, 0, (int16_t) (1000 + i * 10), (uint64_t) cyc0[i]);
+          ody_rt_push_timed (&rt, 1, (int16_t) (-2000 - i * 7), (uint64_t) cyc1[i]);
+        }
+      ody_rt_publish_watermark (&rt, 1000000);
+      ody_rt_render (&rt, out, 4096, 1);
+      for (f = 0; f < 4096; f++)
+        {
+          long long T = Tof (f, lat);
+          int a = 0, b = 0, want;
+          for (i = 0; i < 200; i++)
+            {
+              if (T >= 0 && cyc0[i] <= T) a = 1000 + i * 10;
+              if (T >= 0 && cyc1[i] <= T) b = -2000 - i * 7;
+            }
+          want = a + b;
+          if (want > 32767) want = 32767;
+          if (want < -32767) want = -32767;
+          CHECK (out[f] == want, "timed lat=%d frame %lld: got %d want %d", lat, f, out[f], want);
+        }
+      ody_rt_get_stats (&rt, 0, &st);
+      CHECK (st.underrun_frames == 0, "timed: no underrun when the watermark is ahead");
+      ody_rt_destroy (&rt);
+    }
+
+  /* (b) underrun = AGC time beyond the watermark.  Exact frame accounting. */
+  mk_timed (&rt, 256, 0);
+  ody_rt_set_mute (&rt, 1, 1);
+  for (i = 0; i < 100; i++)
+    ody_rt_push_timed (&rt, 0, (int16_t) (i + 1), (uint64_t) (i * 100 + 50));   /* cycles 50..9950 */
+  W = 3000;
+  ody_rt_set_watermark (&rt, 0, (uint64_t) W);
+  ody_rt_render (&rt, out, 2000, 1);                  /* T reaches 3555: past the watermark */
+  {
+    long long starved = 0, last_ok = -1;
+    for (f = 0; f < 2000; f++)
+      {
+        if (Tof (f, 0) > W) starved++; else last_ok = f;
+      }
+    ody_rt_get_stats (&rt, 0, &st);
+    CHECK (st.underrun_frames == (uint64_t) starved && st.underrun_events == 1,
+           "timed starvation: %llu frames/%llu episodes, expected %lld/1", (unsigned long long) st.underrun_frames,
+           (unsigned long long) st.underrun_events, starved);
+    CHECK (starved > 100, "test really starves (%lld frames)", starved);
+    CHECK (out[1999] == 30, "starved frames hold the newest sample the producer delivered (<= watermark 3000): %d", out[1999]);
+    (void) last_ok;
+  }
+  /* producer catches up: playback resumes at the CORRECT AGC time (late samples are
+   * skipped, not played late) and the episode ends. */
+  ody_rt_set_watermark (&rt, 0, 20000);
+  ody_rt_render (&rt, out, 100, 1);
+  for (f = 0; f < 100; f++)
+    {
+      long long T = Tof (2000 + f, 0);
+      int want = 0;
+      for (i = 0; i < 100; i++) if (i * 100 + 50 <= T) want = i + 1;
+      CHECK (out[f] == want, "resume frame %lld: got %d want %d (T=%lld)", 2000 + f, out[f], want, T);
+    }
+  ody_rt_get_stats (&rt, 0, &st);
+  {
+    long long starved = 0;
+    for (f = 0; f < 2000; f++) if (Tof (f, 0) > W) starved++;
+    CHECK (st.underrun_frames == (uint64_t) starved, "no further underrun after catching up");
+  }
+  ody_rt_destroy (&rt);
+
+  /* (c) before AGC time 0 (latency) nothing plays and nothing counts */
+  mk_timed (&rt, 64, ody_rt_latency_ms_to_cycles (10));
+  ody_rt_render (&rt, out, 100, 1);
+  ody_rt_get_stats (&rt, 0, &st);
+  CHECK (st.underrun_frames == 0 && out[0] == 0 && out[99] == 0, "latency lead-in is silent and uncounted");
+  CHECK (ody_rt_latency_ms_to_cycles (50) == 4266, "50 ms = 4266 cycles");
+  ody_rt_destroy (&rt);
+
+  /* (d) frames_ready matches a brute-force count */
+  for (lat = 0; lat <= 4000; lat += 1333)
+    {
+      mk_timed (&rt, 64, lat);
+      for (W = 0; W < 5000; W += 777)
+        {
+          long long n = 0;
+          for (f = 0; f < 20000; f++) if (Tof (f, lat) <= W) n++;
+          CHECK (ody_rt_frames_ready (&rt, (uint64_t) W) == (uint64_t) n, "frames_ready lat=%d W=%lld: %llu vs %lld", lat, W,
+                 (unsigned long long) ody_rt_frames_ready (&rt, (uint64_t) W), n);
+        }
+      ody_rt_destroy (&rt);
+    }
+}
+
+typedef struct { ody_rt_t *rt; long n; } tprod_t;
+
+static void *
+timed_producer (void *p)
+{
+  tprod_t *a = p;
+  long i;
+  for (i = 1; i <= a->n; i++)
+    {
+      while (!ody_rt_push_timed (a->rt, 0, (int16_t) i, (uint64_t) i * 89))
+        sched_yield ();
+      ody_rt_set_watermark (a->rt, 0, (uint64_t) i * 89);      /* after the push: release */
+      if ((i & 63) == 0)
+        sched_yield ();
+    }
+  ody_rt_set_watermark (a->rt, 0, (uint64_t) a->n * 89 + 100000);
+  return NULL;
+}
+
+static void
+test_timed_threads (void)
+{
+  ody_rt_t rt;
+  pthread_t tp;
+  tprod_t p;
+  int16_t buf[64];
+  long frames = 0, back = 0, mx = 0;
+  int prev = 0;
+  ody_rt_chan_stats_t st;
+
+  mk_timed (&rt, 64, 0);
+  ody_rt_set_active (&rt, 1, 0);
+  p.rt = &rt; p.n = 30000;
+  pthread_create (&tp, NULL, timed_producer, &p);
+  while (mx < 30000 && frames < 40000000)
+    {
+      int k;
+      ody_rt_render (&rt, buf, 64, 1);
+      for (k = 0; k < 64; k++)
+        {
+          if (buf[k] < prev) back++;      /* the newest-sample-<=-T rule can never go backwards */
+          prev = buf[k];
+          if (buf[k] > mx) mx = buf[k];
+        }
+      frames += 64;
+    }
+  pthread_join (tp, NULL);
+  ody_rt_get_stats (&rt, 0, &st);
+  CHECK (back == 0, "timed threaded: %ld backward steps", back);
+  CHECK (mx == 30000, "timed threaded: reached the last sample (%ld)", mx);
+  CHECK (st.pushed == 30000 && st.consumed <= st.pushed, "timed threaded accounting: pushed %llu consumed %llu",
+         (unsigned long long) st.pushed, (unsigned long long) st.consumed);
+  printf ("  timed threaded: 30000 samples through a 64-slot ring, %ld frames, %llu underrun frames, %llu retries(full)\n",
+          frames, (unsigned long long) st.underrun_frames, (unsigned long long) st.dropped);
+  ody_rt_destroy (&rt);
+}
+
 static void
 sleep_ms (long ms)
 {
@@ -675,6 +855,7 @@ test_paced_backend (void)
 int
 main (void)
 {
+  alarm (280);                       /* a hung test (e.g. ring deadlock) must fail, not stall CI */
   printf ("test_rt: ring\n");            test_ring_basics ();
   printf ("test_rt: mixer exactness (16 cases x mono/stereo)\n"); test_mixer ();
   printf ("test_rt: cross-contamination\n"); test_cross_contamination ();
@@ -686,6 +867,7 @@ main (void)
   run_stream ("blocking-producer ring 4096", 4096, 3000000, 1);
   run_stream ("dropping-producer ring 64  ", 64, 3000000, 0);
   printf ("test_rt: control changes while running\n"); test_controls_while_running ();
+  printf ("test_rt: timed mode (cycle-stamped playback)\n"); test_timed (); test_timed_threads ();
   printf ("test_rt: paced device-emulation backend (real thread, wall clock)\n"); test_paced_backend ();
   printf ("test_rt: render time\n"); test_render_time ();
   printf ("test_rt: %ld checks, %ld failures\n", checks, failures);

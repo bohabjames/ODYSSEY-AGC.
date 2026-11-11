@@ -371,6 +371,39 @@ echo "-- offline determinism --"
 aurun again
 eq "repeat run: WAV byte-identical" "$(md5sum < "$tmp/a_again.wav")" "$(md5sum < "$tmp/a_both.wav")"
 
+echo "-- TIMED mode (default): every AGC sample is played at its own AGC cycle --"
+taurun() { # taurun TAG SLICE LATENCY_MS [mono] args...   (offline, deterministic)
+  tag=$1; sl=$2; lat=$3; shift 3; ch=2
+  if [ "${1:-}" = mono ]; then ch=1; shift; fi
+  "$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --bus --cycles 300000 --slice "$sl" \
+    --audio-latency-ms "$lat" --audio-channels $ch --out-cmc "$tmp/t_$tag.c.csv" --out-lgc "$tmp/t_$tag.l.csv" \
+    --audio-wav "$tmp/t_$tag.wav" "$@" > "$tmp/t_$tag.stats"
+  python3 -I tests/oracle_rt.py "$tmp/t_$tag.c.csv" "$tmp/t_$tag.l.csv" "$tmp/t_$tag.wav" --cycles 300000 \
+    --latency-ms "$lat" --channels $ch "$@" > "$tmp/t_$tag.log" 2>&1
+  rc=$?
+  if [ $rc -eq 0 ]; then pass "timed $tag (slice $sl, latency $lat ms): WAV equals the independent model exactly ($(tail -1 "$tmp/t_$tag.log" | cut -c11-))"
+  else fail "timed $tag: WAV differs from the model"; sed 's/^/        /' "$tmp/t_$tag.log"; fi
+  eq "timed $tag: no underruns, no drops" "$(stat "$tmp/t_$tag.stats" audio_cmc_underrun_frames)$(stat "$tmp/t_$tag.stats" audio_lgc_underrun_frames)$(stat "$tmp/t_$tag.stats" audio_cmc_dropped)$(stat "$tmp/t_$tag.stats" audio_lgc_dropped)" "0000"
+}
+taurun both 1000 50
+taurun s1 1 0
+taurun s7 7 20 --mute-lgc
+taurun s4096 4096 100 --gain-cmc 0.5 --master 0.8
+taurun solo 1000 50 --solo-cmc --mute-cmc --solo-lgc
+taurun mono 1000 50 mono --gain-lgc 0.7
+taurun clip 1000 50 --gain-cmc 4 --gain-lgc 4 --master 4
+taurun cmc 1000 50 --mute-lgc
+taurun lgc 1000 50 --mute-cmc
+eq "timed: CMC-only + LGC-only == mixed render, frame for frame" "$(python3 -I -c "
+import wave
+def rd(n):
+    w=wave.open('$tmp/t_%s.wav'%n,'rb'); d=w.readframes(w.getnframes())
+    return [int.from_bytes(d[i:i+2],'little',signed=True) for i in range(0,len(d),2)]
+a,b,m=rd('cmc'),rd('lgc'),rd('both')
+print('equal' if len(a)==len(b)==len(m) and all(max(-32767,min(32767,x+y))==z for x,y,z in zip(a,b,m)) else 'DIFFERENT')")" equal
+taurun again 1000 50
+eq "timed repeat run: WAV byte-identical" "$(md5sum < "$tmp/t_again.wav")" "$(md5sum < "$tmp/t_both.wav")"
+
 echo "-- real-time pacing through the paced device-emulation backend (wall clock) --"
 t0=$(date +%s.%N)
 "$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --bus --cycles 170666 --slice 1000 \
@@ -390,6 +423,14 @@ ok = w.getnchannels()==2 and w.getframerate()==48000 and w.getsampwidth()==2 and
 print(n, 'frames', 'non-silent' if any(d) else 'SILENT'); sys.exit(0 if ok else 1)"
 gt "worst audio callback duration recorded (ns; measurement)" "$(stat "$tmp/rt_paced.stats" audio_max_render_ns)" 0
 eq "worst callback is far inside the 5.3 ms period (< 1 ms)" "$([ "$(stat "$tmp/rt_paced.stats" audio_max_render_ns)" -lt 1000000 ] && echo yes || echo no)" yes
+
+echo "-- paced TIMED mode --"
+"$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --bus --cycles 170666 --slice 1000 \
+  --realtime --audio-backend paced --audio-device "$tmp/rt_timed.wav" --audio-latency-ms 50 --audio-period 256 > "$tmp/rt_timed.stats"
+eq "paced TIMED run (latency 50 ms): no underruns, no drops, 96000 frames" "$(stat "$tmp/rt_timed.stats" audio_cmc_underrun_frames)/$(stat "$tmp/rt_timed.stats" audio_lgc_underrun_frames)/$(stat "$tmp/rt_timed.stats" audio_cmc_dropped)/$(stat "$tmp/rt_timed.stats" audio_lgc_dropped)/$(stat "$tmp/rt_timed.stats" audio_rendered_frames)" "0/0/0/0/96000"
+check "paced TIMED WAV holds real sound" python3 -I -c "
+import wave,sys
+w=wave.open('$tmp/rt_timed.wav','rb'); d=w.readframes(w.getnframes()); sys.exit(0 if any(d) and w.getnframes()==96000 else 1)"
 
 echo "-- backend / option errors --"
 "$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --cycles 1000 --audio-backend alsa > "$tmp/alsa.out" 2> "$tmp/alsa.err"

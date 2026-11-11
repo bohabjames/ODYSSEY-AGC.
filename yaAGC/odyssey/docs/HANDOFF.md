@@ -19,7 +19,7 @@ started.** See `AUDIO-ENGINE.md`.
 | 8.1 real-time audio | done | SPSC atomic rings, mixer, paced backend; WAV equals independent model; unit/stress under ASan+TSan; mutation-tested; ALSA untested; see `AUDIO-ENGINE.md` |
 | 6 virtual bus | done | `test_bus` (about 422k checks incl. a 70000-message wrap lap) + BUS-* ROMs using real `READ`/`WRITE`; both directions and duplex; slice-invariant content; mutation-tested (9/9 caught) |
 
-`make test` = 250 PASS lines, 0 FAIL, plus the isolation suite (also `make tsan`). `make asan` passes.
+`make test` = 274 PASS lines, 0 FAIL, plus the isolation suite (also `make tsan`). `make asan` passes.
 No upstream VirtualAGC file changed in M5/M6 (only the 3 files from M4).
 
 ## Build / test
