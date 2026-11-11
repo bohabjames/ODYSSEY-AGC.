@@ -1,7 +1,7 @@
 # Upstream changes made for ODYSSEY-AGC
 
 AGENTS.md requires every changed upstream file to be documented. As of
-milestone 4 (and still true after milestones 5, 6 and 7, which changed no upstream file) **exactly three upstream files differ from the VirtualAGC checkout**
+milestone 4 (and still true after milestones 5, 6, 7 and 8 phase 1, which changed no upstream file) **exactly three upstream files differ from the VirtualAGC checkout**
 (`git diff --stat`: 3 files, 99 insertions, 70 deletions). Everything else under
 `yaAGC/odyssey/` is new.
 

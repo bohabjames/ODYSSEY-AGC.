@@ -29,6 +29,7 @@
 #include "odyssey_engine.h"
 #include "odyssey_capture.h"
 #include "odyssey_scheduler.h"
+#include "odyssey_backend.h"
 #include "odyssey_bus.h"
 
 static double
@@ -37,6 +38,68 @@ now_seconds (void)
   struct timespec ts;
   clock_gettime (CLOCK_MONOTONIC, &ts);
   return (double) ts.tv_sec + (double) ts.tv_nsec * 1e-9;
+}
+
+/* ---- M8 audio options (dual mode) ---- */
+typedef struct
+{
+  const char *wav;            /* --audio-wav: deterministic offline render     */
+  const char *backend;        /* --audio-backend paced|alsa (real-time)        */
+  const char *device;         /* --audio-device (alsa PCM name, or WAV path)   */
+  uint32_t rate, period, stream_rate, channels, ring, prefill;
+  double gain[2], master;
+  int mute[2], solo[2];
+  int realtime;               /* pace the scheduler to the wall clock          */
+} audio_opts_t;
+
+typedef struct
+{
+  double start;
+  ody_offline_t *off;         /* offline renderer or NULL                      */
+  int realtime;
+} round_ctx_t;
+
+static void
+round_hook (void *ctx, uint64_t cycles)
+{
+  round_ctx_t *r = ctx;
+  if (r->off != NULL)
+    ody_offline_hook (r->off, cycles);
+  if (r->realtime)
+    {
+      double due = r->start + (double) cycles / (double) AGC_PER_SECOND, now = now_seconds ();
+      if (due > now)
+        {
+          struct timespec ts;
+          double d = due - now;
+          ts.tv_sec = (time_t) d;
+          ts.tv_nsec = (long) ((d - (double) ts.tv_sec) * 1e9);
+          nanosleep (&ts, NULL);
+        }
+    }
+}
+
+static void
+print_audio_stats (ody_rt_t *rt, ody_backend_t *be, const ody_offline_t *off)
+{
+  static const char *nm[2] = { "cmc", "lgc" };
+  int i;
+  for (i = 0; i < 2; i++)
+    {
+      ody_rt_chan_stats_t s;
+      ody_rt_get_stats (rt, i, &s);
+      printf ("audio_%s_pushed=%" PRIu64 "\naudio_%s_consumed=%" PRIu64 "\n", nm[i], s.pushed, nm[i], s.consumed);
+      printf ("audio_%s_dropped=%" PRIu64 "\naudio_%s_overrun_events=%" PRIu64 "\n", nm[i], s.dropped, nm[i], s.overrun_events);
+      printf ("audio_%s_underrun_events=%" PRIu64 "\naudio_%s_underrun_frames=%" PRIu64 "\n", nm[i], s.underrun_events, nm[i], s.underrun_frames);
+      printf ("audio_%s_peak=%d\n", nm[i], (int) s.peak);
+    }
+  printf ("audio_rendered_frames=%" PRIu64 "\naudio_clipped_frames=%" PRIu64 "\n",
+          ody_rt_rendered_frames (rt), ody_rt_clipped_frames (rt));
+  if (be != NULL)
+    printf ("audio_periods=%" PRIu64 "\naudio_max_render_ns=%" PRIu64 "\n", ody_backend_periods (be),
+            ody_backend_max_render_ns (be));
+  if (off != NULL)
+    printf ("audio_offline_frames=%" PRIu64 "\n", off->rendered);
 }
 
 static void
@@ -50,7 +113,20 @@ usage (const char *argv0)
            "  --slice N   cycles per bounded slice (default %u)\n"
            "  --out FILE  write captured samples as CSV (single mode)\n"
            "  --bus       dual mode: attach the virtual bus and print its counters\n"
-           "  --ack-timeout N  report mailbox acks pending longer than N rounds\n",
+           "  --ack-timeout N  report mailbox acks pending longer than N rounds\n"
+           "audio (dual mode, milestone 8):\n"
+           "  --audio-wav F        deterministic offline render of the mix to WAV file F\n"
+           "  --audio-backend K    real-time output: 'paced' (wall-clock device emulator,\n"
+           "                       writes --audio-device as WAV) or 'alsa' (if built in);\n"
+           "                       implies --realtime\n"
+           "  --audio-device D     alsa PCM name or paced WAV path\n"
+           "  --audio-rate N (48000) --audio-period N (512) --audio-channels 1|2 (2)\n"
+           "  --audio-stream-rate N (1000)  AGC samples/s mapped onto the stream\n"
+           "  --audio-prefill N (0) start a channel only once N samples are queued\n"
+           "  --audio-ring N (16384) ring capacity per computer (power of two)\n"
+           "  --gain-cmc G --gain-lgc G --master G   linear gains, 0..4 (default 1)\n"
+           "  --mute-cmc --mute-lgc --solo-cmc --solo-lgc\n"
+           "  --realtime           pace the scheduler to the wall clock\n",
            argv0, argv0, ODY_DEFAULT_SLICE_CYCLES);
 }
 
@@ -135,6 +211,7 @@ main (int argc, char **argv)
   uint32_t slice = ODY_DEFAULT_SLICE_CYCLES;
   int i, rc, dual, use_bus = 0;
   uint32_t ack_timeout = 0;
+  audio_opts_t au = { NULL, NULL, NULL, 48000, 512, 1000, 2, 16384, 0, { 1.0, 1.0 }, 1.0, { 0, 0 }, { 0, 0 }, 0 };
 
   for (i = 1; i < argc; i++)
     {
@@ -162,6 +239,40 @@ main (int argc, char **argv)
         st_lgc = argv[++i];
       else if (!strcmp (argv[i], "--bus-log") && i + 1 < argc)
         bus_log_path = argv[++i];
+      else if (!strcmp (argv[i], "--audio-wav") && i + 1 < argc)
+        au.wav = argv[++i];
+      else if (!strcmp (argv[i], "--audio-backend") && i + 1 < argc)
+        au.backend = argv[++i], au.realtime = 1;
+      else if (!strcmp (argv[i], "--audio-device") && i + 1 < argc)
+        au.device = argv[++i];
+      else if (!strcmp (argv[i], "--audio-rate") && i + 1 < argc)
+        au.rate = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--audio-period") && i + 1 < argc)
+        au.period = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--audio-channels") && i + 1 < argc)
+        au.channels = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--audio-stream-rate") && i + 1 < argc)
+        au.stream_rate = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--audio-prefill") && i + 1 < argc)
+        au.prefill = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--audio-ring") && i + 1 < argc)
+        au.ring = (uint32_t) strtoul (argv[++i], NULL, 10);
+      else if (!strcmp (argv[i], "--gain-cmc") && i + 1 < argc)
+        au.gain[0] = atof (argv[++i]);
+      else if (!strcmp (argv[i], "--gain-lgc") && i + 1 < argc)
+        au.gain[1] = atof (argv[++i]);
+      else if (!strcmp (argv[i], "--master") && i + 1 < argc)
+        au.master = atof (argv[++i]);
+      else if (!strcmp (argv[i], "--mute-cmc"))
+        au.mute[0] = 1;
+      else if (!strcmp (argv[i], "--mute-lgc"))
+        au.mute[1] = 1;
+      else if (!strcmp (argv[i], "--solo-cmc"))
+        au.solo[0] = 1;
+      else if (!strcmp (argv[i], "--solo-lgc"))
+        au.solo[1] = 1;
+      else if (!strcmp (argv[i], "--realtime"))
+        au.realtime = 1;
       else if (!strcmp (argv[i], "--bus"))
         use_bus = 1;
       else if (!strcmp (argv[i], "--ack-timeout") && i + 1 < argc)
@@ -177,7 +288,9 @@ main (int argc, char **argv)
                               out != NULL)) ||
       (!dual && (rom == NULL || out_cmc != NULL || out_lgc != NULL || use_bus ||
                  st_cmc != NULL || st_lgc != NULL || bus_log_path != NULL)) ||
-      (dual && st_single != NULL) || (bus_log_path != NULL && !use_bus))
+      (dual && st_single != NULL) || (bus_log_path != NULL && !use_bus) ||
+      (!dual && (au.wav != NULL || au.backend != NULL || au.realtime)) ||
+      (au.wav != NULL && au.backend != NULL) || (au.channels != 1 && au.channels != 2))
     {
       usage (argv[0]);
       return 2;
@@ -244,6 +357,14 @@ main (int argc, char **argv)
       FILE *fc = NULL, *fl = NULL, *fsc = NULL, *fsl = NULL, *flog = NULL;
       double t0, t1;
       int status = 0;
+      int want_audio = (au.wav != NULL || au.backend != NULL);
+      ody_rt_t rt;
+      ody_rt_feed_t feed[2];
+      ody_wav_t wav;
+      ody_offline_t off;
+      ody_backend_t *be = NULL;
+      round_ctx_t rctx = { 0, NULL, 0 };
+      int rt_ok = 0, wav_ok = 0;
 
       if (cmc == NULL || lgc == NULL || (use_bus && bus == NULL))
         {
@@ -292,9 +413,79 @@ main (int argc, char **argv)
               bus->ack_timeout_rounds = ack_timeout;
               odyssey_scheduler_attach_bus (&sched, bus);
             }
+          if (want_audio)
+            {
+              if (ody_rt_init (&rt, au.ring, au.rate, au.stream_rate) != 0)
+                {
+                  fprintf (stderr, "audio: bad --audio-ring/--audio-rate/--audio-stream-rate\n");
+                  status = 6;
+                }
+              else
+                {
+                  int id;
+                  rt_ok = 1;
+                  for (id = 0; id < 2; id++)
+                    {
+                      feed[id].rt = &rt;
+                      feed[id].id = id;
+                      odyssey_scheduler_set_sink (&sched, id, ody_rt_sink, &feed[id]);
+                      ody_rt_set_prefill (&rt, id, au.prefill);
+                      ody_rt_set_active (&rt, id, 1);
+                      ody_rt_set_gain_q15 (&rt, id, ody_rt_gain_from_float (au.gain[id]));
+                      ody_rt_set_mute (&rt, id, au.mute[id]);
+                      ody_rt_set_solo (&rt, id, au.solo[id]);
+                    }
+                  ody_rt_set_master_q15 (&rt, ody_rt_gain_from_float (au.master));
+                  if (au.wav != NULL)
+                    {
+                      if (ody_wav_open (&wav, au.wav, au.rate, au.channels) != 0)
+                        {
+                          fprintf (stderr, "audio: cannot open %s\n", au.wav);
+                          status = 6;
+                        }
+                      else
+                        {
+                          wav_ok = 1;
+                          ody_offline_init (&off, &rt, &wav, au.channels);
+                          rctx.off = &off;
+                        }
+                    }
+                  else
+                    {
+                      ody_backend_cfg_t bc;
+                      char err[160] = "";
+                      bc.device = au.device;
+                      bc.rate = au.rate;
+                      bc.period_frames = au.period;
+                      bc.channels = au.channels;
+                      be = ody_backend_create (au.backend, &rt, &bc, err, sizeof err);
+                      if (be == NULL)
+                        {
+                          fprintf (stderr, "audio: %s\n", err);
+                          status = 6;
+                        }
+                    }
+                }
+            }
+          if (status == 0)
+            {
+              rctx.realtime = au.realtime;
+              if (want_audio || au.realtime)
+                odyssey_scheduler_set_round_hook (&sched, round_hook, &rctx);
+              if (be != NULL && ody_backend_start (be) != 0)
+                {
+                  fprintf (stderr, "audio: backend failed to start\n");
+                  status = 6;
+                }
+            }
+          if (status != 0)
+            goto audio_done;
           t0 = now_seconds ();
+          rctx.start = t0;
           odyssey_scheduler_run (&sched, total);
           t1 = now_seconds ();
+          if (be != NULL)
+            ody_backend_stop (be);
           print_stats ("cmc_", cmc_rom, cmc, &sched.capture[ODY_COMPUTER_CMC],
                        slice, t1 - t0);
           print_stats ("lgc_", lgc_rom, lgc, &sched.capture[ODY_COMPUTER_LGC],
@@ -308,7 +499,16 @@ main (int argc, char **argv)
               print_bus_stats ("lgc_", bus, ODY_COMPUTER_LGC);
               printf ("bus_queue_capacity=%u\n", (unsigned) ODY_BUS_QUEUE_CAPACITY);
             }
+          if (rt_ok)
+            print_audio_stats (&rt, be, rctx.off);
         }
+    audio_done:
+      if (be != NULL)
+        ody_backend_destroy (be);
+      if (wav_ok)
+        (void) ody_wav_close (&wav);
+      if (rt_ok)
+        ody_rt_destroy (&rt);
       if (fc != NULL)
         fclose (fc);
       if (fl != NULL)

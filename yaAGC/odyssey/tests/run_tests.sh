@@ -314,6 +314,90 @@ for f in cmc.csv lgc.csv cmc.st lgc.st bus; do
   eq "repeat run: $f byte-identical" "$(md5sum < "$tmp/s_base2.$f")" "$(md5sum < "$tmp/s_base.$f")"
 done
 
+echo "== milestone 8 phase 1: real-time audio engine =="
+check "rt core + paced backend unit/stress tests (test_rt: ring, mixer, controls, underruns, threads)" "$build/test_rt"
+
+# The callback must not call anything: no allocation, locks, stdio, syscalls.  Only the
+# compiler's stack-protector abort path is allowed.  (Skipped under sanitizers, which
+# instrument every access with runtime calls.)
+if [ -z "${SAN:-}" ] && command -v objdump >/dev/null 2>&1; then
+  objdump -dr --no-show-raw-insn "$build/odyssey_rt.o" |
+    awk '/^[0-9a-f]+ <ody_rt_render>:/{f=1;next} /^[0-9a-f]+ <.*>:/{f=0} f' > "$tmp/render.s"
+  gt "ody_rt_render disassembly extracted (lines)" "$(wc -l < "$tmp/render.s")" 50
+  calls=$(grep -E 'R_X86_64_(PLT32|PC32|GOTPCREL)' "$tmp/render.s" | grep -v -E '\.(text|rodata|bss|data)' | grep -v '__stack_chk_fail' | wc -l)
+  eq "ody_rt_render makes no calls (no malloc/free/locks/stdio/syscalls); only __stack_chk_fail allowed" "$calls" 0
+fi
+
+aurun() { # aurun TAG [mono] args...   (offline deterministic render, stream rate 500 so the ring stays ahead)
+  tag=$1; shift; ch=2
+  if [ "${1:-}" = mono ]; then ch=1; shift; fi
+  "$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --bus --cycles 300000 --slice 1000 \
+    --audio-stream-rate 500 --audio-channels $ch --out-cmc "$tmp/a_c.csv" --out-lgc "$tmp/a_l.csv" \
+    --audio-wav "$tmp/a_$tag.wav" "$@" > "$tmp/a_$tag.stats"
+  python3 -I tests/oracle_rt.py "$tmp/a_c.csv" "$tmp/a_l.csv" "$tmp/a_$tag.wav" --stream 500 --channels $ch "$@" > "$tmp/a_$tag.log" 2>&1
+  rc=$?
+  if [ $rc -eq 0 ]; then pass "$tag: WAV equals the independent model exactly ($(tail -1 "$tmp/a_$tag.log" | cut -c11-))"
+  else fail "$tag: WAV differs from the model"; sed 's/^/        /' "$tmp/a_$tag.log"; fi
+  eq "$tag: no underruns, no drops" "$(stat "$tmp/a_$tag.stats" audio_cmc_underrun_frames)$(stat "$tmp/a_$tag.stats" audio_lgc_underrun_frames)$(stat "$tmp/a_$tag.stats" audio_cmc_dropped)$(stat "$tmp/a_$tag.stats" audio_lgc_dropped)" "0000"
+}
+echo "-- offline render of the real CMC+LGC synth through the mixer --"
+aurun both                                     # 3. both computers together
+aurun cmc --mute-lgc                           # 1. CMC independently
+aurun lgc --mute-cmc                           # 2. LGC independently
+aurun gains --gain-cmc 0.5 --gain-lgc 0.25     # 4. independent gains
+aurun master --master 0.6                      # 6. master gain
+aurun solocmc --solo-cmc
+aurun sololgc --solo-lgc
+aurun solomute --solo-cmc --mute-cmc --solo-lgc   # 5. mute beats solo on the same channel
+aurun allmute --mute-cmc --mute-lgc
+aurun clip --gain-cmc 4 --gain-lgc 4 --master 4   # clipping saturates, never wraps
+aurun mono mono --gain-lgc 0.7
+gt "clip run really clipped" "$(stat "$tmp/a_clip.stats" audio_clipped_frames)" 1000
+eq "all-muted run is digital silence (peak of the mix)" "$(python3 -I -c "
+import wave,sys
+w=wave.open('$tmp/a_allmute.wav','rb'); d=w.readframes(w.getnframes()); print(max(d) if d else 'empty')")" 0
+# 7. no cross-contamination, checked on the real AGC streams: CMC-only and LGC-only renders
+# add up to the mixed render sample for sample (unity gains, no clipping in this run)
+eq "CMC-only + LGC-only == mixed render, frame for frame" "$(python3 -I -c "
+import wave
+def rd(n):
+    w=wave.open('$tmp/a_%s.wav'%n,'rb'); d=w.readframes(w.getnframes())
+    return [int.from_bytes(d[i:i+2],'little',signed=True) for i in range(0,len(d),2)]
+a,b,m=rd('cmc'),rd('lgc'),rd('both')
+print('equal' if len(a)==len(b)==len(m) and all(max(-32767,min(32767,x+y))==z for x,y,z in zip(a,b,m)) else 'DIFFERENT')")" equal
+gt "CMC-only and LGC-only renders differ from each other (bytes)" "$(cmp -l "$tmp/a_cmc.wav" "$tmp/a_lgc.wav" | wc -l)" 1000
+
+echo "-- offline determinism --"
+aurun again
+eq "repeat run: WAV byte-identical" "$(md5sum < "$tmp/a_again.wav")" "$(md5sum < "$tmp/a_both.wav")"
+
+echo "-- real-time pacing through the paced device-emulation backend (wall clock) --"
+t0=$(date +%s.%N)
+"$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --bus --cycles 170666 --slice 1000 \
+  --realtime --audio-backend paced --audio-device "$tmp/rt_paced.wav" --audio-stream-rate 500 \
+  --audio-prefill 200 --audio-period 256 > "$tmp/rt_paced.stats"
+t1=$(date +%s.%N)
+el=$(python3 -c "print(round($t1-$t0,2))")
+check "scheduler paced to the wall clock: 2.0 AGC-seconds took >= 1.9 s real (took $el s)" python3 -c "import sys; sys.exit(0 if $t1-$t0 >= 1.9 else 1)"
+gt "audio callback ran (periods)" "$(stat "$tmp/rt_paced.stats" audio_periods)" 300
+eq "paced run: no overruns/dropped samples" "$(stat "$tmp/rt_paced.stats" audio_cmc_dropped)$(stat "$tmp/rt_paced.stats" audio_lgc_dropped)" "00"
+eq "paced run: underruns (cushioned by prefill; wall-clock dependent)" "$(stat "$tmp/rt_paced.stats" audio_cmc_underrun_frames)$(stat "$tmp/rt_paced.stats" audio_lgc_underrun_frames)" "00"
+check "paced WAV is a valid 16-bit stereo 48 kHz file holding every rendered period and real sound" python3 -I -c "
+import wave,sys
+w=wave.open('$tmp/rt_paced.wav','rb')
+n=w.getnframes(); d=w.readframes(n)
+ok = w.getnchannels()==2 and w.getframerate()==48000 and w.getsampwidth()==2 and n==$(stat "$tmp/rt_paced.stats" audio_rendered_frames) and any(d)
+print(n, 'frames', 'non-silent' if any(d) else 'SILENT'); sys.exit(0 if ok else 1)"
+gt "worst audio callback duration recorded (ns; measurement)" "$(stat "$tmp/rt_paced.stats" audio_max_render_ns)" 0
+eq "worst callback is far inside the 5.3 ms period (< 1 ms)" "$([ "$(stat "$tmp/rt_paced.stats" audio_max_render_ns)" -lt 1000000 ] && echo yes || echo no)" yes
+
+echo "-- backend / option errors --"
+"$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --cycles 1000 --audio-backend alsa > "$tmp/alsa.out" 2> "$tmp/alsa.err"
+eq "alsa requested but not built: clean failure (exit 6)" "$?" 6
+check "alsa failure message names the cause" grep -q "no ALSA support" "$tmp/alsa.err"
+eq "bad --audio-ring (not power of two) rejected" "$("$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --cycles 1000 --audio-wav "$tmp/x.wav" --audio-ring 1000 >/dev/null 2>&1; echo $?)" 6
+eq "audio options in single-computer mode rejected (exit 2)" "$("$host" --rom "$roms/SEQTEST.bin" --audio-wav "$tmp/x.wav" >/dev/null 2>&1; echo $?)" 2
+
 echo
 if [ "$fails" -eq 0 ]; then echo "ALL TESTS PASSED"; else echo "$fails CHECK(S) FAILED"; fi
 exit "$fails"

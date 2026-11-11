@@ -39,6 +39,27 @@ odyssey_scheduler_set_status_csv (odyssey_scheduler_t *s, int id, FILE *csv)
 }
 
 void
+odyssey_scheduler_set_sink (odyssey_scheduler_t *s, int id, ody_sample_sink_fn sink, void *ctx)
+{
+  if (s != NULL && id >= 0 && id < ODY_MAX_COMPUTERS)
+    {
+      s->capture[id].sink = sink;
+      s->capture[id].sink_ctx = ctx;
+    }
+}
+
+void
+odyssey_scheduler_set_round_hook (odyssey_scheduler_t *s, void (*hook) (void *, uint64_t),
+                                  void *ctx)
+{
+  if (s != NULL)
+    {
+      s->round_hook = hook;
+      s->round_hook_ctx = ctx;
+    }
+}
+
+void
 odyssey_scheduler_attach_bus (odyssey_scheduler_t *s, odyssey_bus_t *bus)
 {
   int id;
@@ -65,6 +86,9 @@ odyssey_scheduler_round (odyssey_scheduler_t *s, uint32_t budget)
     odyssey_bus_deliver (s->bus);
   /* 6: bookkeeping */
   s->rounds++;
+  s->cycles += budget;
+  if (s->round_hook != NULL)
+    s->round_hook (s->round_hook_ctx, s->cycles);
 }
 
 uint64_t

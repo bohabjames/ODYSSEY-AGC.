@@ -17,9 +17,13 @@ void
 ody_capture_reset (ody_capture_t *cap)
 {
   FILE *csv = cap->csv, *status_csv = cap->status_csv;
+  ody_sample_sink_fn sink = cap->sink;
+  void *sink_ctx = cap->sink_ctx;
   memset (cap, 0, sizeof *cap);
   cap->csv = csv;
   cap->status_csv = status_csv;
+  cap->sink = sink;
+  cap->sink_ctx = sink_ctx;
 }
 
 void
@@ -53,6 +57,8 @@ ody_capture_drain (ody_capture_t *cap, odyssey_computer_t *c)
       cap->prev_cycle = cap->last_cycle = s.cycle;
       cap->have_prev = 1;
       cap->samples++;
+      if (cap->sink != NULL)
+        cap->sink (cap->sink_ctx, &s);
 
       if (cap->csv != NULL)
         fprintf (cap->csv, "%" PRIu32 ",%" PRIu64 ",%05o,%d,%d\n", s.seq,

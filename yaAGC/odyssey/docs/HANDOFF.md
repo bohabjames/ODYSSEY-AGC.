@@ -5,7 +5,8 @@ Branch history: M1-M6 merged to `master` (PRs #1, #2). M7 is on `claude/odyssey-
 ## State
 
 Milestones 1-7 of AGENTS.md are done, each with test evidence. **Milestone 8
-(real-time audio) is NOT started.**
+phase 1 (real-time audio engine) is done and tested; phase 2 (DSKY GUI) is NOT
+started.** See `AUDIO-ENGINE.md`.
 
 | M | Status | Evidence |
 |---|---|---|
@@ -15,9 +16,10 @@ Milestones 1-7 of AGENTS.md are done, each with test evidence. **Milestone 8
 | 4 state isolation | done | differential vs frozen pristine engine bit-identical; interleaved/reset/destroy isolation; controls fail on the pristine engine |
 | 5 dual execution | done | `test_sched` (70 checks) + CLI: dual output equals isolated runs at slices 1, 7, 1000, 4096, 299999; reset/destroy of one leaves the other untouched; mutation-tested |
 | 7 dual synthesis | done | `SYNTH-CMC`/`SYNTH-LGC` match an independent exact model (base and ALT); bus-off controls; identical-prefix-then-diverge causality; closed-loop base vs ALT; slices 1/7/4096; deterministic; see `SYNTH-PROTOCOL.md` |
+| 8.1 real-time audio | done | SPSC atomic rings, mixer, paced backend; WAV equals independent model; unit/stress under ASan+TSan; mutation-tested; ALSA untested; see `AUDIO-ENGINE.md` |
 | 6 virtual bus | done | `test_bus` (about 422k checks incl. a 70000-message wrap lap) + BUS-* ROMs using real `READ`/`WRITE`; both directions and duplex; slice-invariant content; mutation-tested (9/9 caught) |
 
-`make test` = 172 PASS lines, 0 FAIL, plus the isolation suite. `make asan` passes.
+`make test` = 250 PASS lines, 0 FAIL, plus the isolation suite (also `make tsan`). `make asan` passes.
 No upstream VirtualAGC file changed in M5/M6 (only the 3 files from M4).
 
 ## Build / test
@@ -42,6 +44,7 @@ Dual: `build/odyssey-agc --cmc-rom C.bin --lgc-rom L.bin [--bus] [--ack-timeout 
 * `BUS-PROTOCOL.md` - the bus contract, scheduler boundary, engine facts, limits
 * `AGC-PROGRAMMING-RULES.md` - watchdogs, CCS/TS/one's-complement, register
   addresses, yaYUL gotchas (read before writing any AGC assembly)
+* `AUDIO-ENGINE.md` - M8 phase 1: ring ordering, callback rules, tests, limits
 * `SYNTH-PROTOCOL.md` - M7 programs, message semantics, verification
 * `STATE-ISOLATION-AUDIT.md`, `UPSTREAM-CHANGES.md`, `CHANNEL-VERIFICATION.md`
 
@@ -51,7 +54,7 @@ Dual: `build/odyssey-agc --cmc-rom C.bin --lgc-rom L.bin [--bus] [--ack-timeout 
 (`ChannelOutput` routes audio/bus by `State->agc_clientdata`, `ChannelInput`
 republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
 `odyssey_capture.[ch]` drain/validate/CSV; `odyssey_scheduler.[ch]` round-robin
-(round order is a documented contract); `odyssey_bus.[ch]` the bus;
+(round order is a documented contract); `odyssey_bus.[ch]` the bus; `odyssey_rt.[ch]` atomic rings + mixer + render, `odyssey_backend.[ch]` WAV/paced/ALSA backends;
 `flight/tests/*.agc` test ROMs; `tests/` all tests and the Python oracle.
 
 ## Measured (this sandbox; measurements, not guarantees)
@@ -77,7 +80,9 @@ republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
   scheduler slice bounds bus throughput (about 85333/slice messages per AGC-second).
 * `tests/baseline/` is a frozen copy of pristine engine files; never edit it.
 
-## Next steps (M8)
+## Next steps
 
-1. M8: real-time audio backend behind a small interface: atomics on the sample
-   ring, underrun/overrun counters, independent gain/mute/solo, mixing.
+1. M8 phase 2: DSKY GUI. It must only call the `ody_rt_set_*` / `get_*` /
+   `read_peak` API (never touch the rings), keep the scheduler off the GUI thread,
+   and preserve offline determinism. Run `make test` and `make tsan` after.
+2. Test the ALSA backend on a machine with a sound device (`make ODY_WITH_ALSA=1`).

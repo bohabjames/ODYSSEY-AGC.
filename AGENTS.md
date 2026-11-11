@@ -411,4 +411,4 @@ Record instructions/cycles per second, samples per second, timing variation, mes
 The dual-AGC engine is not complete merely because two emulator structures can be allocated. It is complete when two independently executing AGCs can generate their own synthesis values, exchange musical messages through the virtual spacecraft bus, and produce separately capturable audio streams that the host can play and mix—without shared mutable CPU state and without host-generated oscillator waveforms.
 
 ## Progress & handoff
-Current status (milestones 1-7 done, 8 pending) and next steps: `yaAGC/odyssey/docs/HANDOFF.md`.
+Current status (milestones 1-7 done, 8 phase 1 (audio engine) done, phase 2 (DSKY GUI) pending) and next steps: `yaAGC/odyssey/docs/HANDOFF.md`.

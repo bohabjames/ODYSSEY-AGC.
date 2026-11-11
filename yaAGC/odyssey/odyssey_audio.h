@@ -29,7 +29,10 @@ typedef struct
  * consumer (the drain/mixer side).  Today both run on one host thread, so no
  * atomics are used; if the audio callback ever drains on another thread,
  * head/tail MUST become C11 atomics with acquire/release ordering.  (That is
- * a documented TODO for milestone 8, not an implemented guarantee.) */
+ * a documented TODO for milestone 8, not an implemented guarantee.)
+ * M8 NOTE: this queue stays single-thread by design.  The cross-thread path is
+ * the separate atomic PCM ring in odyssey_rt.[ch]; the capture sink copies
+ * samples from here into it. */
 typedef struct
 {
   ody_sample_t *slots;

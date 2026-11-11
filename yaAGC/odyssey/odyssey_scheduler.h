@@ -41,6 +41,9 @@ typedef struct odyssey_scheduler
   odyssey_bus_t *bus;          /* borrowed; NULL = no bus                    */
   uint32_t slice;              /* engine calls per computer per round        */
   uint64_t rounds;             /* completed rounds                           */
+  uint64_t cycles;             /* engine calls given to EACH computer so far */
+  void (*round_hook) (void *ctx, uint64_t cycles);
+  void *round_hook_ctx;
 } odyssey_scheduler_t;
 
 /* Both computers must be initialised.  slice must be > 0.  Returns 0 or <0. */
@@ -52,6 +55,16 @@ void odyssey_scheduler_set_csv (odyssey_scheduler_t *s, int id, FILE *csv);
 
 /* Optional channel-0301 status log for one computer (stream not owned). */
 void odyssey_scheduler_set_status_csv (odyssey_scheduler_t *s, int id, FILE *csv);
+
+/* Optional real-time audio feed for one computer (M8): every drained sample
+ * is also passed to sink(ctx, sample).  ctx not owned. */
+void odyssey_scheduler_set_sink (odyssey_scheduler_t *s, int id,
+                                 ody_sample_sink_fn sink, void *ctx);
+
+/* Optional hook run at step 6 of every round (after bus delivery), on the
+ * scheduler thread.  Used for offline audio rendering and real-time pacing. */
+void odyssey_scheduler_set_round_hook (odyssey_scheduler_t *s,
+                                       void (*hook) (void *ctx, uint64_t cycles), void *ctx);
 
 /* Attach a bus (borrowed): both computers' bus pointers are set and delivery
  * runs at step 5 of every round.  Call after both computers are initialised. */

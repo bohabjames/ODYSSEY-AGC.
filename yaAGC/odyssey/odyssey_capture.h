@@ -14,6 +14,10 @@
 #include <stdint.h>
 #include "odyssey_engine.h"
 
+/* Optional per-sample hook (M8): called for every drained audio sample, on the
+ * draining (scheduler) thread.  Used to feed the real-time rings. */
+typedef void (*ody_sample_sink_fn) (void *ctx, const ody_sample_t *s);
+
 typedef struct
 {
   uint64_t samples;           /* samples drained                              */
@@ -28,6 +32,8 @@ typedef struct
   FILE *status_csv;           /* optional channel-0301 log (seq,cycle,word_octal) */
   uint64_t status_words;      /* status words drained                         */
   uint64_t status_seq_gaps;
+  ody_sample_sink_fn sink;    /* optional, not owned */
+  void *sink_ctx;
 } ody_capture_t;
 
 /* csv may be NULL.  The caller owns (opens/closes) the stream and writes any
