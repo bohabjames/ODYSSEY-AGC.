@@ -34,6 +34,14 @@
 #define ODY_RT_GAIN_MAX (4u * ODY_RT_GAIN_UNITY)   /* +12 dB ceiling          */
 #define ODY_RT_CACHELINE 64
 
+/* Every atomic the audio callback touches must be lock-free (a lock-based
+ * emulation would take a lock in the callback).  2 = always lock-free.  The
+ * 64-bit counters/watermark are the ones that can fail on 32-bit targets
+ * (e.g. ARMv6, MIPS32).  Refuse to build there instead of silently locking. */
+_Static_assert (ATOMIC_INT_LOCK_FREE == 2, "32-bit atomics must be lock-free");
+_Static_assert (ATOMIC_LONG_LOCK_FREE == 2 && ATOMIC_LLONG_LOCK_FREE == 2,
+                "64-bit atomics must be lock-free");
+
 /* One ring slot.  `cycle` is the AGC cycle stamp of the sample (used by timed
  * mode; ignored by fixed-stream mode). */
 typedef struct { uint64_t cycle; int16_t pcm; } ody_rt_slot_t;
@@ -108,7 +116,7 @@ typedef struct { ody_rt_t *rt; int id; } ody_rt_feed_t;
  *   guess.  Underrun = T is beyond the producer's published watermark.
  * Returns 0 or <0.  Not RT-safe (allocates). */
 int  ody_rt_init (ody_rt_t *rt, uint32_t ring_capacity, uint32_t device_rate,
-                  uint32_t stream_rate);
+                  uint32_t stream_rate);   /* -3: an atomic is not lock-free here */
 void ody_rt_destroy (ody_rt_t *rt);
 
 /* ---- producer (scheduler thread) ---- */
@@ -143,13 +151,19 @@ void ody_rt_set_mute (ody_rt_t *rt, int id, int on);
 void ody_rt_set_solo (ody_rt_t *rt, int id, int on);
 void ody_rt_set_master_q15 (ody_rt_t *rt, uint32_t q15);          /* clamped */
 uint32_t ody_rt_gain_from_float (double g);                        /* -> Q15, clamped */
+/* Read back the CURRENT mixer state (so a UI never has to shadow it). */
+uint32_t ody_rt_get_gain_q15 (const ody_rt_t *rt, int id);
+int      ody_rt_get_mute (const ody_rt_t *rt, int id);
+int      ody_rt_get_solo (const ody_rt_t *rt, int id);
+uint32_t ody_rt_get_master_q15 (const ody_rt_t *rt);
 
 /* ---- monitoring (any thread) ---- */
 typedef struct
 {
   uint64_t pushed, dropped, overrun_events, consumed;
   uint64_t underrun_events, underrun_frames;
-  uint32_t fill;                      /* samples currently in the ring         */
+  uint32_t fill;                      /* samples in the ring, 0..capacity (a racy
+                                       * estimate, clamped; never garbage)       */
   int32_t peak;                       /* NOT reset by get_stats                */
 } ody_rt_chan_stats_t;
 void ody_rt_get_stats (const ody_rt_t *rt, int id, ody_rt_chan_stats_t *out);

@@ -99,8 +99,18 @@ print_audio_stats (ody_rt_t *rt, ody_backend_t *be, const ody_offline_t *off)
   printf ("audio_rendered_frames=%" PRIu64 "\naudio_clipped_frames=%" PRIu64 "\n",
           ody_rt_rendered_frames (rt), ody_rt_clipped_frames (rt));
   if (be != NULL)
-    printf ("audio_periods=%" PRIu64 "\naudio_max_render_ns=%" PRIu64 "\n", ody_backend_periods (be),
-            ody_backend_max_render_ns (be));
+    {
+      ody_backend_stats_t bs;
+      ody_backend_get_stats (be, &bs);
+      printf ("audio_periods=%" PRIu64 "\naudio_max_render_ns=%" PRIu64 "\n", bs.periods, bs.max_render_ns);
+      printf ("audio_device_frames_written=%" PRIu64 "\naudio_device_partial_writes=%" PRIu64 "\n",
+              bs.frames_written, bs.partial_writes);
+      printf ("audio_device_xruns=%" PRIu64 "\naudio_device_recoveries=%" PRIu64 "\n", bs.xruns, bs.recoveries);
+      printf ("audio_device_write_errors=%" PRIu64 "\naudio_device_stalls=%" PRIu64 "\n", bs.write_errors, bs.stalls);
+      printf ("audio_device_fatal=%d\n", bs.fatal);
+      if (bs.fatal)
+        fprintf (stderr, "audio: the output device failed (errno %d); audio stopped being rendered\n", bs.fatal);
+    }
   if (off != NULL)
     printf ("audio_offline_frames=%" PRIu64 "\n", off->rendered);
 }

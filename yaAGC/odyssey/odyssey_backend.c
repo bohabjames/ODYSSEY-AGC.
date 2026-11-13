@@ -3,6 +3,7 @@
  * See odyssey_backend.h.
  */
 #define _POSIX_C_SOURCE 200809L
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -129,6 +130,7 @@ struct ody_backend
   _Atomic uint64_t max_render_ns;
   ody_wav_t wav;
   int16_t *buf;
+  ody_pcm_stats_t pcm_stats;
 #ifdef ODY_HAVE_ALSA
   snd_pcm_t *pcm;
 #endif
@@ -153,6 +155,72 @@ timed_render (ody_backend_t *b)
   atomic_fetch_add_explicit (&b->periods, 1, memory_order_relaxed);
 }
 
+static void
+sleep_us (unsigned usec)
+{
+  struct timespec ts;
+  ts.tv_sec = usec / 1000000u;
+  ts.tv_nsec = (long) (usec % 1000000u) * 1000;
+  nanosleep (&ts, NULL);
+}
+
+int
+ody_pcm_write_all (const ody_pcm_ops_t *ops, void *dev, const int16_t *buf, uint32_t frames,
+                   uint32_t channels, ody_pcm_stats_t *st, const _Atomic int *stop)
+{
+  uint32_t done = 0;
+  unsigned stuck = 0;                       /* consecutive attempts with no progress */
+  void (*idle) (unsigned) = ops->idle ? ops->idle : sleep_us;
+
+  while (done < frames)
+    {
+      long n;
+      if (stop != NULL && atomic_load_explicit (stop, memory_order_acquire))
+        {
+          atomic_fetch_add_explicit (&st->frames_abandoned, frames - done, memory_order_relaxed);
+          return 1;
+        }
+      n = ops->writei (dev, buf + (size_t) done * channels, frames - done);
+      if (n > 0)
+        {
+          if ((uint32_t) n < frames - done)
+            atomic_fetch_add_explicit (&st->partial_writes, 1, memory_order_relaxed);
+          done += (uint32_t) n;
+          atomic_fetch_add_explicit (&st->frames_written, (uint64_t) n, memory_order_relaxed);
+          stuck = 0;
+          continue;
+        }
+      if (n == 0 || n == -EAGAIN)
+        {                                   /* no space right now: wait, do not spin */
+          atomic_fetch_add_explicit (&st->stalls, 1, memory_order_relaxed);
+          if (++stuck >= ODY_PCM_MAX_STUCK * 8)
+            {
+              atomic_store_explicit (&st->fatal, EAGAIN, memory_order_relaxed);
+              return -1;
+            }
+          idle (1000);
+          continue;
+        }
+      /* n < 0: a real error (xrun, suspend, interrupted, ...) */
+      atomic_fetch_add_explicit (&st->write_errors, 1, memory_order_relaxed);
+      if (n == -EPIPE)
+        atomic_fetch_add_explicit (&st->xruns, 1, memory_order_relaxed);
+      if (ops->recover (dev, (int) n) == 0)
+        atomic_fetch_add_explicit (&st->recoveries, 1, memory_order_relaxed);
+      else
+        {
+          atomic_fetch_add_explicit (&st->recovery_failures, 1, memory_order_relaxed);
+          idle (10000);
+        }
+      if (++stuck >= ODY_PCM_MAX_STUCK)
+        {
+          atomic_store_explicit (&st->fatal, (int) -n, memory_order_relaxed);
+          return -1;
+        }
+    }
+  return 0;
+}
+
 static void *
 paced_thread (void *arg)
 {
@@ -163,7 +231,10 @@ paced_thread (void *arg)
     {
       struct timespec ts;
       timed_render (b);
-      (void) ody_wav_write (&b->wav, b->buf, b->cfg.period_frames);   /* emulated device sink */
+      if (ody_wav_write (&b->wav, b->buf, b->cfg.period_frames) != 0)   /* emulated device sink */
+        atomic_fetch_add_explicit (&b->pcm_stats.write_errors, 1, memory_order_relaxed);
+      else
+        atomic_fetch_add_explicit (&b->pcm_stats.frames_written, b->cfg.period_frames, memory_order_relaxed);
       ts.tv_sec = (time_t) (next / 1000000000ull);
       ts.tv_nsec = (long) (next % 1000000000ull);
       clock_nanosleep (CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
@@ -173,17 +244,30 @@ paced_thread (void *arg)
 }
 
 #ifdef ODY_HAVE_ALSA
+static long
+alsa_writei (void *dev, const void *buf, unsigned long frames)
+{
+  return (long) snd_pcm_writei ((snd_pcm_t *) dev, buf, (snd_pcm_uframes_t) frames);
+}
+
+static int
+alsa_recover (void *dev, int err)
+{
+  return snd_pcm_recover ((snd_pcm_t *) dev, err, 1);   /* handles -EPIPE, -ESTRPIPE, -EINTR */
+}
+
 static void *
 alsa_thread (void *arg)
 {
   ody_backend_t *b = arg;
+  static const ody_pcm_ops_t ops = { alsa_writei, alsa_recover, NULL };
   while (!atomic_load_explicit (&b->stop, memory_order_acquire))
     {
-      snd_pcm_sframes_t n;
       timed_render (b);
-      n = snd_pcm_writei (b->pcm, b->buf, b->cfg.period_frames);   /* blocks on the device clock */
-      if (n < 0)
-        (void) snd_pcm_recover (b->pcm, (int) n, 1);               /* xrun: recover, keep going */
+      /* blocks on the device clock; delivers the whole period or gives up */
+      if (ody_pcm_write_all (&ops, b->pcm, b->buf, b->cfg.period_frames, b->cfg.channels, &b->pcm_stats,
+                             &b->stop) < 0)
+        break;                                  /* fatal flag is set; see ody_backend_get_stats */
     }
   return NULL;
 }
@@ -225,15 +309,30 @@ ody_backend_create (const char *kind, ody_rt_t *rt, const ody_backend_cfg_t *cfg
       unsigned int rate = cfg->rate;
       const char *dev = cfg->device ? cfg->device : "default";
       b->kind = 1;
-      if (snd_pcm_open (&b->pcm, dev, SND_PCM_STREAM_PLAYBACK, 0) < 0 ||
-          snd_pcm_set_params (b->pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
-                              cfg->channels, rate, 0,
-                              (unsigned int) ((uint64_t) cfg->period_frames * 4 * 1000000 / rate)) < 0)
+      int e = snd_pcm_open (&b->pcm, dev, SND_PCM_STREAM_PLAYBACK, 0);
+      if (e < 0)
         {
-          if (b->pcm)
-            snd_pcm_close (b->pcm);
           free (b->buf);
-          FAIL ("cannot open/configure the ALSA device");
+          if (err)
+            snprintf (err, errlen, "cannot open ALSA device '%s': %s", dev, snd_strerror (e));
+          free (b);
+          return NULL;
+        }
+      /* soft_resample = 0: if the hardware cannot run at this exact rate, fail
+       * loudly rather than let ALSA resample (the engine's timing assumes the
+       * device really consumes `rate` frames per second). */
+      e = snd_pcm_set_params (b->pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
+                              cfg->channels, rate, 0,
+                              (unsigned int) ((uint64_t) cfg->period_frames * 4 * 1000000 / rate));
+      if (e < 0)
+        {
+          snd_pcm_close (b->pcm);
+          free (b->buf);
+          if (err)
+            snprintf (err, errlen, "ALSA device '%s' refused %u Hz, %u channel(s), S16: %s", dev,
+                      (unsigned) rate, (unsigned) cfg->channels, snd_strerror (e));
+          free (b);
+          return NULL;
         }
       return b;
 #else
@@ -305,4 +404,25 @@ uint64_t
 ody_backend_max_render_ns (const ody_backend_t *b)
 {
   return atomic_load_explicit (&((ody_backend_t *) b)->max_render_ns, memory_order_relaxed);
+}
+
+void
+ody_backend_get_stats (const ody_backend_t *bc, ody_backend_stats_t *o)
+{
+  ody_backend_t *b = (ody_backend_t *) bc;
+  const memory_order R = memory_order_relaxed;
+  memset (o, 0, sizeof *o);
+  if (b == NULL)
+    return;
+  o->periods = atomic_load_explicit (&b->periods, R);
+  o->max_render_ns = atomic_load_explicit (&b->max_render_ns, R);
+  o->frames_written = atomic_load_explicit (&b->pcm_stats.frames_written, R);
+  o->partial_writes = atomic_load_explicit (&b->pcm_stats.partial_writes, R);
+  o->xruns = atomic_load_explicit (&b->pcm_stats.xruns, R);
+  o->write_errors = atomic_load_explicit (&b->pcm_stats.write_errors, R);
+  o->recoveries = atomic_load_explicit (&b->pcm_stats.recoveries, R);
+  o->recovery_failures = atomic_load_explicit (&b->pcm_stats.recovery_failures, R);
+  o->stalls = atomic_load_explicit (&b->pcm_stats.stalls, R);
+  o->frames_abandoned = atomic_load_explicit (&b->pcm_stats.frames_abandoned, R);
+  o->fatal = atomic_load_explicit (&b->pcm_stats.fatal, R);
 }

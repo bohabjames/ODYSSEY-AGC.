@@ -5,8 +5,12 @@ Branch history: M1-M6 merged to `master` (PRs #1, #2). M7 is on `claude/odyssey-
 ## State
 
 Milestones 1-7 of AGENTS.md are done, each with test evidence. **Milestone 8
-phase 1 (real-time audio engine) is done and tested; phase 2 (DSKY GUI) is NOT
-started.** See `AUDIO-ENGINE.md`.
+phase 1 (real-time audio engine) is done, tested and has been reviewed and
+corrected (see "Phase 1 review" in `AUDIO-ENGINE.md`); phase 2 (GUI) is NOT
+started.** A redesign of the GUI is expected, so build it on the control and
+monitoring API in `AUDIO-ENGINE.md`, not on any earlier sketch. No real audio
+device has ever been used by this project (ALSA never ran against real libasound;
+the paced backend only writes a WAV).
 
 | M | Status | Evidence |
 |---|---|---|
@@ -16,10 +20,12 @@ started.** See `AUDIO-ENGINE.md`.
 | 4 state isolation | done | differential vs frozen pristine engine bit-identical; interleaved/reset/destroy isolation; controls fail on the pristine engine |
 | 5 dual execution | done | `test_sched` (70 checks) + CLI: dual output equals isolated runs at slices 1, 7, 1000, 4096, 299999; reset/destroy of one leaves the other untouched; mutation-tested |
 | 7 dual synthesis | done | `SYNTH-CMC`/`SYNTH-LGC` match an independent exact model (base and ALT); bus-off controls; identical-prefix-then-diverge causality; closed-loop base vs ALT; slices 1/7/4096; deterministic; see `SYNTH-PROTOCOL.md` |
-| 8.1 real-time audio | done | SPSC atomic rings, mixer, paced backend; WAV equals independent model; unit/stress under ASan+TSan; mutation-tested; ALSA untested; see `AUDIO-ENGINE.md` |
+| 8.1 real-time audio | done, reviewed | SPSC atomic rings, mixer, paced backend; WAV equals independent model; unit/stress under ASan+TSan; mutation-tested; reset semantics tested; ALSA logic tested only against fakes (never real libasound/hardware); see `AUDIO-ENGINE.md`, `AUDIO-BACKENDS.md` |
 | 6 virtual bus | done | `test_bus` (about 422k checks incl. a 70000-message wrap lap) + BUS-* ROMs using real `READ`/`WRITE`; both directions and duplex; slice-invariant content; mutation-tested (9/9 caught) |
 
-`make test` = 274 PASS lines, 0 FAIL, plus the isolation suite (also `make tsan`). `make asan` passes.
+`make test` = 281 PASS lines, 0 FAIL, plus the isolation suite. `make asan` passes
+(279 PASS; disassembly check skipped under sanitizers). `make tsan` (gcc only) covers
+`test_rt` and the threaded fake-ALSA test.
 No upstream VirtualAGC file changed in M5/M6 (only the 3 files from M4).
 
 ## Build / test
@@ -44,7 +50,9 @@ Dual: `build/odyssey-agc --cmc-rom C.bin --lgc-rom L.bin [--bus] [--ack-timeout 
 * `BUS-PROTOCOL.md` - the bus contract, scheduler boundary, engine facts, limits
 * `AGC-PROGRAMMING-RULES.md` - watchdogs, CCS/TS/one's-complement, register
   addresses, yaYUL gotchas (read before writing any AGC assembly)
-* `AUDIO-ENGINE.md` - M8 phase 1: ring ordering, callback rules, tests, limits
+* `AUDIO-ENGINE.md` - M8 phase 1: ring ordering, callback rules, reset semantics,
+  the UI control/monitoring API, tests, limits, review record
+* `AUDIO-BACKENDS.md` - plan (not implemented) for a cross-platform real backend
 * `SYNTH-PROTOCOL.md` - M7 programs, message semantics, verification
 * `STATE-ISOLATION-AUDIT.md`, `UPSTREAM-CHANGES.md`, `CHANNEL-VERIFICATION.md`
 
@@ -54,7 +62,7 @@ Dual: `build/odyssey-agc --cmc-rom C.bin --lgc-rom L.bin [--bus] [--ack-timeout 
 (`ChannelOutput` routes audio/bus by `State->agc_clientdata`, `ChannelInput`
 republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
 `odyssey_capture.[ch]` drain/validate/CSV; `odyssey_scheduler.[ch]` round-robin
-(round order is a documented contract); `odyssey_bus.[ch]` the bus; `odyssey_rt.[ch]` atomic rings + mixer + render, `odyssey_backend.[ch]` WAV/paced/ALSA backends;
+(round order is a documented contract); `odyssey_bus.[ch]` the bus; `odyssey_rt.[ch]` atomic rings + mixer + render, `odyssey_backend.[ch]` WAV/paced/ALSA backends and the device write loop (`ody_pcm_write_all`); `tests/fake_alsa/` a FAKE libasound for tests; `tests/check_gui_api.sh` GUI/engine boundary check;
 `flight/tests/*.agc` test ROMs; `tests/` all tests and the Python oracle.
 
 ## Measured (this sandbox; measurements, not guarantees)
@@ -69,7 +77,16 @@ republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
 * Pre-existing upstream UBSan finding in the `DAS` handler (`c(Address10 - 1)`
   at `Address10 == 0`); identical in the frozen baseline; hit only by the
   Comanche055 isolation workload; left unfixed on purpose.
-* The audio ring and bus are single-thread only. M8 needs atomics (and TSan).
+* Threading: the scheduler, computers, capture queues and bus are single-threaded
+  (scheduler thread only). Only the SPSC PCM rings, mixer controls and counters in
+  `odyssey_rt` are cross-thread (atomics, TSan-tested). A UI must use only the API in
+  `AUDIO-ENGINE.md` and gets scheduler-side data through snapshots the scheduler
+  thread publishes (not built yet).
+* Resetting one computer: audio stamps are rebased onto the scheduler timeline and a
+  rest sample is emitted (`AUDIO-ENGINE.md`, "Reset semantics"). No ring flush while
+  the audio thread runs exists yet.
+* A plain `make` now builds everything (a `.DEFAULT_GOAL` fix; before, it could
+  silently build only one object once `build/*.d` existed).
 * Section 3 of `STATE-ISOLATION-AUDIT.md`: debugger, coverage, DEDA, telemetry
   and socket subsystems must stay off with more than one computer.
 * `0301` is a record-only status word (M7); the host never acts on it.
@@ -82,7 +99,11 @@ republishes the mailbox); `odyssey_audio.[ch]` sample queue + conversions;
 
 ## Next steps
 
-1. M8 phase 2: DSKY GUI. It must only call the `ody_rt_set_*` / `get_*` /
-   `read_peak` API (never touch the rings), keep the scheduler off the GUI thread,
-   and preserve offline determinism. Run `make test` and `make tsan` after.
-2. Test the ALSA backend on a machine with a sound device (`make ODY_WITH_ALSA=1`).
+1. M8 phase 2: GUI (redesign pending). It must only call the control/monitoring API
+   (`AUDIO-ENGINE.md`; `tests/check_gui_api.sh` enforces it), keep the scheduler off
+   the GUI thread, and preserve offline determinism. It needs, and must first
+   design, (a) a scheduler-thread snapshot + command queue and (b) a consumer-owned
+   ring flush for stop/restart. Run `make test`, `make asan` and `make tsan` after.
+2. A real audio backend: follow `AUDIO-BACKENDS.md` (miniaudio recommended). The ALSA
+   backend must still be run on a real machine (`make ODY_WITH_ALSA=1`) before any
+   claim about it.

@@ -68,6 +68,16 @@ ody_rt_init (ody_rt_t *rt, uint32_t cap, uint32_t device_rate, uint32_t stream_r
       atomic_init (&c->peak, 0);
     }
   atomic_init (&rt->master_q15, ODY_RT_GAIN_UNITY);
+  /* Runtime counterpart of the _Static_asserts in odyssey_rt.h: the objects
+   * the callback really uses, as laid out on this target. */
+  if (!atomic_is_lock_free (&rt->chan[0].ring.head) || !atomic_is_lock_free (&rt->chan[0].ring.tail) ||
+      !atomic_is_lock_free (&rt->chan[0].watermark) || !atomic_is_lock_free (&rt->chan[0].underrun_frames) ||
+      !atomic_is_lock_free (&rt->chan[0].gain_q15) || !atomic_is_lock_free (&rt->chan[0].peak) ||
+      !atomic_is_lock_free (&rt->master_q15) || !atomic_is_lock_free (&rt->rendered_frames))
+    {
+      ody_rt_destroy (rt);
+      return -3;
+    }
   atomic_init (&rt->rendered_frames, 0);
   atomic_init (&rt->clipped_frames, 0);
   rt->device_rate = device_rate;
@@ -359,6 +369,10 @@ ody_rt_render (ody_rt_t *rt, int16_t *out, uint32_t frames, uint32_t channels)
         atomic_fetch_add_explicit (&c->consumed, got[i], RLX);
       if (starved_frames[i])
         atomic_fetch_add_explicit (&c->underrun_frames, starved_frames[i], RLX);
+      /* load+store, not CAS (no retry loop in the callback).  A concurrent
+       * ody_rt_read_peak() can make this overwrite the reset with a value that
+       * is still a true post-gain peak of this period: harmless, at worst the
+       * reader sees one period's peak twice. */
       if (peak[i] > atomic_load_explicit (&c->peak, RLX))
         atomic_store_explicit (&c->peak, peak[i], RLX);
     }
@@ -429,9 +443,36 @@ ody_rt_get_stats (const ody_rt_t *rt, int id, ody_rt_chan_stats_t *o)
   o->underrun_events = atomic_load_explicit (&c->underrun_events, RLX);
   o->underrun_frames = atomic_load_explicit (&c->underrun_frames, RLX);
   o->peak = atomic_load_explicit (&c->peak, RLX);
+  /* tail first, then head: the producer can only have moved head FORWARD since,
+   * so h - t never wraps negative; it can overshoot the true value by the pops
+   * that happened in between, hence the clamp. */
   t = atomic_load_explicit (&c->ring.tail, ACQ);
   h = atomic_load_explicit (&c->ring.head, ACQ);
-  o->fill = h - t;
+  o->fill = (h - t) > c->ring.capacity ? c->ring.capacity : (h - t);
+}
+
+uint32_t
+ody_rt_get_gain_q15 (const ody_rt_t *rt, int id)
+{
+  return (id < 0 || id >= ODY_RT_CHANNELS) ? 0 : atomic_load_explicit (&rt->chan[id].gain_q15, RLX);
+}
+
+int
+ody_rt_get_mute (const ody_rt_t *rt, int id)
+{
+  return (id < 0 || id >= ODY_RT_CHANNELS) ? 0 : atomic_load_explicit (&rt->chan[id].mute, RLX) != 0;
+}
+
+int
+ody_rt_get_solo (const ody_rt_t *rt, int id)
+{
+  return (id < 0 || id >= ODY_RT_CHANNELS) ? 0 : atomic_load_explicit (&rt->chan[id].solo, RLX) != 0;
+}
+
+uint32_t
+ody_rt_get_master_q15 (const ody_rt_t *rt)
+{
+  return atomic_load_explicit (&rt->master_q15, RLX);
 }
 
 int32_t

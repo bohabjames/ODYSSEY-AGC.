@@ -116,7 +116,10 @@ about 12 rounds, i.e. last report at cycle 12103 for slice 1000, 49251 for slice
 
 ## Limits and open points
 
-* Single thread only. No atomics; do not feed the bus from an audio thread.
+* The bus is owned by the scheduler thread and is not thread-safe: no atomics, and
+  neither an audio callback nor a UI thread may call it. (M8 added cross-thread
+  audio, but only through the separate SPSC PCM rings in `odyssey_rt`; the bus is
+  untouched by it.)
 * No interrupt delivery; receivers must poll 0320.
 * Message TYPE meanings and payloads for the synth ROMs are defined in `SYNTH-PROTOCOL.md` (M7).
 * `--bus-log FILE` (M7, host-side record only) writes `C,round,sender,type,seq,d0,d1` per accepted commit, `D,round,receiver,seq` per delivery, `K,round,receiver,seq` per ack (octal fields).

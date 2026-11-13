@@ -408,9 +408,31 @@ consumer (void *p)
   return NULL;
 }
 
+/* A GUI-like monitor thread: polls stats and the peak meter at full speed while
+ * the producer and the callback run.  fill must always be within 0..capacity. */
+typedef struct { ody_rt_t *rt; uint32_t cap; _Atomic int stop; long polls, bad_fill; } mon_t;
+
+static void *
+monitor (void *p)
+{
+  mon_t *m = p;
+  ody_rt_chan_stats_t st;
+  while (!atomic_load (&m->stop))
+    {
+      ody_rt_get_stats (m->rt, 0, &st);
+      if (st.fill > m->cap)
+        m->bad_fill++;
+      (void) ody_rt_read_peak (m->rt, 0);
+      m->polls++;
+    }
+  return NULL;
+}
+
 static void
 run_stream (const char *name, uint32_t cap, long n, int wait_when_full)
 {
+  mon_t mon;
+  pthread_t tm;
   ody_rt_t rt;
   pthread_t tp, tc;
   prod_t p;
@@ -425,6 +447,9 @@ run_stream (const char *name, uint32_t cap, long n, int wait_when_full)
   memset (&c, 0, sizeof c);
   c.rt = &rt;
   p.rt = &rt; p.id = 0; p.n = n; p.wait_when_full = wait_when_full; p.offered = 0;
+  memset (&mon, 0, sizeof mon);
+  mon.rt = &rt; mon.cap = cap;
+  pthread_create (&tm, NULL, monitor, &mon);
   pthread_create (&tc, NULL, consumer, &c);
   pthread_create (&tp, NULL, producer, &p);
   pthread_join (tp, NULL);
@@ -437,6 +462,10 @@ run_stream (const char *name, uint32_t cap, long n, int wait_when_full)
     }
   atomic_store (&c.stop, 1);
   pthread_join (tc, NULL);
+  atomic_store (&mon.stop, 1);
+  pthread_join (tm, NULL);
+  CHECK (mon.bad_fill == 0, "%s: monitor saw fill > capacity %ld times in %ld polls", name, mon.bad_fill, mon.polls);
+  CHECK (mon.polls > 0, "%s: monitor polled", name);
   ody_rt_get_stats (&rt, 0, &st);
   (void) tail;
   remaining = (long) st.fill;
@@ -488,6 +517,190 @@ controller (void *p)
       sched_yield ();
     }
   return NULL;
+}
+
+/* Item 7: the control API reads back exactly what was set; ids are bounds-checked;
+ * the lock-free requirement is checked at init. */
+static void
+test_readback (void)
+{
+  ody_rt_t rt;
+  int id;
+  mk (&rt, 64);
+  for (id = 0; id < ODY_RT_CHANNELS; id++)
+    {
+      CHECK (ody_rt_get_gain_q15 (&rt, id) == ODY_RT_GAIN_UNITY, "default gain unity");
+      CHECK (!ody_rt_get_mute (&rt, id) && !ody_rt_get_solo (&rt, id), "default not muted/soloed");
+      ody_rt_set_gain_q15 (&rt, id, 12345u + (uint32_t) id);
+      ody_rt_set_mute (&rt, id, 1);
+      ody_rt_set_solo (&rt, id, 7);                  /* any nonzero is "on" */
+      CHECK (ody_rt_get_gain_q15 (&rt, id) == 12345u + (uint32_t) id, "gain read back");
+      CHECK (ody_rt_get_mute (&rt, id) == 1 && ody_rt_get_solo (&rt, id) == 1, "mute/solo read back as 0/1");
+      ody_rt_set_gain_q15 (&rt, id, 0xFFFFFFFFu);
+      CHECK (ody_rt_get_gain_q15 (&rt, id) == ODY_RT_GAIN_MAX, "gain clamped to the +12 dB ceiling");
+      ody_rt_set_mute (&rt, id, 0);
+      CHECK (!ody_rt_get_mute (&rt, id) && ody_rt_get_solo (&rt, id), "solo on, mute off are independent");
+      ody_rt_set_solo (&rt, id, 0);
+      ody_rt_set_mute (&rt, id, 1);
+      CHECK (ody_rt_get_mute (&rt, id) && !ody_rt_get_solo (&rt, id), "mute on, solo off are independent");
+      ody_rt_set_mute (&rt, id, 0);
+      CHECK (!ody_rt_get_mute (&rt, id) && !ody_rt_get_solo (&rt, id), "cleared");
+    }
+  ody_rt_set_master_q15 (&rt, 20000);
+  CHECK (ody_rt_get_master_q15 (&rt) == 20000, "master read back");
+  ody_rt_set_master_q15 (&rt, 999999);
+  CHECK (ody_rt_get_master_q15 (&rt) == ODY_RT_GAIN_MAX, "master clamped");
+  ody_rt_set_gain_q15 (&rt, 0, ODY_RT_GAIN_UNITY);
+  /* out-of-range channel ids are ignored / read as 0, never out-of-bounds */
+  ody_rt_set_gain_q15 (&rt, -1, 5); ody_rt_set_gain_q15 (&rt, ODY_RT_CHANNELS, 5);
+  ody_rt_set_mute (&rt, 99, 1); ody_rt_set_solo (&rt, -5, 1);
+  CHECK (ody_rt_get_gain_q15 (&rt, -1) == 0 && ody_rt_get_gain_q15 (&rt, ODY_RT_CHANNELS) == 0, "bad id gain");
+  CHECK (ody_rt_get_mute (&rt, 99) == 0 && ody_rt_get_solo (&rt, -5) == 0, "bad id flags");
+  CHECK (ody_rt_get_gain_q15 (&rt, 0) == ODY_RT_GAIN_UNITY, "bad ids changed nothing");
+  /* the atomics the callback uses are lock-free on this target */
+  CHECK (atomic_is_lock_free (&rt.chan[0].ring.head) && atomic_is_lock_free (&rt.chan[1].watermark) &&
+         atomic_is_lock_free (&rt.chan[0].underrun_frames) && atomic_is_lock_free (&rt.master_q15),
+         "atomics lock-free");
+  ody_rt_destroy (&rt);
+}
+
+/* ---- item 2: the device write loop, against a scripted fake device ---- */
+#include <errno.h>
+typedef struct
+{
+  int16_t *got;
+  size_t got_frames, cap;
+  uint32_t ch, max_chunk;           /* 0 = no partial writes                         */
+  size_t err_at[8];                 /* inject err[k] when got_frames reaches err_at[k] */
+  long err[8];
+  int nerr, k;
+  int recover_ok;                   /* recover() result is 0 when set                */
+  long eagain_left, zero_left;
+  int recover_calls, always_fail_write;
+  struct { uint64_t partial, xruns, recov, stalls, recfail; int fatal; } r;   /* stats after the run */
+} fdev_t;
+
+static long
+fd_writei (void *d, const void *buf, unsigned long frames)
+{
+  fdev_t *f = d;
+  unsigned long n = frames;
+  if (f->always_fail_write) return -EIO;
+  if (f->eagain_left > 0) { f->eagain_left--; return -EAGAIN; }
+  if (f->zero_left > 0) { f->zero_left--; return 0; }
+  if (f->k < f->nerr)
+    {
+      if (f->got_frames >= f->err_at[f->k]) return f->err[f->k++];
+      if (n > f->err_at[f->k] - f->got_frames) n = f->err_at[f->k] - f->got_frames;   /* stop exactly at the fault */
+    }
+  if (f->max_chunk && n > f->max_chunk) n = f->max_chunk;
+  if (f->got_frames + n > f->cap) n = f->cap - f->got_frames;
+  memcpy (f->got + f->got_frames * f->ch, buf, n * f->ch * sizeof (int16_t));
+  f->got_frames += n;
+  return (long) n;
+}
+static int fd_recover (void *d, int err) { fdev_t *f = d; (void) err; f->recover_calls++; return f->recover_ok ? 0 : -EIO; }
+static void fd_idle (unsigned us) { (void) us; }
+
+#define PF 1000
+static void
+pcm_case (const char *name, fdev_t *f, int want_rc, int expect_complete)
+{
+  static const ody_pcm_ops_t ops = { fd_writei, fd_recover, fd_idle };
+  int16_t src[PF * 2];
+  ody_pcm_stats_t st;
+  _Atomic int stop;
+  int i, rc;
+  for (i = 0; i < PF * 2; i++) src[i] = (int16_t) (i * 7 + 1);
+  f->ch = 2; f->cap = PF * 2;
+  f->got = calloc (f->cap * 2, sizeof (int16_t));
+  memset (&st, 0, sizeof st);
+  atomic_init (&stop, 0);
+  rc = ody_pcm_write_all (&ops, f, src, PF, 2, &st, &stop);
+  CHECK (rc == want_rc, "%s: rc %d want %d", name, rc, want_rc);
+  if (expect_complete)
+    {
+      CHECK (f->got_frames == PF, "%s: delivered %zu of %d frames", name, f->got_frames, PF);
+      CHECK (memcmp (f->got, src, sizeof src) == 0, "%s: delivered data is the period exactly once, in order", name);
+      CHECK (atomic_load (&st.frames_written) == PF, "%s: frames_written", name);
+    }
+  /* in every case, whatever WAS delivered is an exact prefix: never skipped or repeated */
+  CHECK (memcmp (f->got, src, f->got_frames * 2 * sizeof (int16_t)) == 0, "%s: delivered frames are an exact prefix", name);
+  /* hand the stats back through the fixture for the caller's own checks */
+  f->r.partial = atomic_load (&st.partial_writes);
+  f->r.xruns = atomic_load (&st.xruns);
+  f->r.recov = atomic_load (&st.recoveries);
+  f->r.stalls = atomic_load (&st.stalls);
+  f->r.fatal = atomic_load (&st.fatal);
+  f->r.recfail = atomic_load (&st.recovery_failures);
+  free (f->got);
+}
+
+static void
+test_pcm_write_all (void)
+{
+  fdev_t f;
+  /* 1. clean device */
+  memset (&f, 0, sizeof f); f.recover_ok = 1;
+  pcm_case ("clean", &f, 0, 1);
+  CHECK (f.r.partial == 0 && f.r.xruns == 0 && f.r.recov == 0, "clean: no partials/xruns/recoveries");
+  /* 2. partial writes of 100 frames: 10 writes; the first 9 are asked for more than 100 so are
+   *    partial, the 10th asks for exactly 100 and is complete */
+  memset (&f, 0, sizeof f); f.recover_ok = 1; f.max_chunk = 100;
+  pcm_case ("partial-100", &f, 0, 1);
+  CHECK (f.r.partial == 9, "partial-100: %llu partial writes (want 9)", (unsigned long long) f.r.partial);
+  /* 3. xrun in the MIDDLE of a period: remainder retried after recovery, not lost */
+  memset (&f, 0, sizeof f); f.recover_ok = 1;
+  f.err_at[0] = 300; f.err[0] = -EPIPE; f.nerr = 1;
+  pcm_case ("xrun-mid-period", &f, 0, 1);
+  CHECK (f.r.xruns == 1 && f.r.recov == 1, "xrun-mid-period: 1 xrun, 1 recovery (got %llu,%llu)", (unsigned long long) f.r.xruns, (unsigned long long) f.r.recov);
+  /* 4. xrun on the very first write of a period */
+  memset (&f, 0, sizeof f); f.recover_ok = 1;
+  f.err_at[0] = 0; f.err[0] = -EPIPE; f.nerr = 1;
+  pcm_case ("xrun-first-write", &f, 0, 1);
+  /* 5. partial writes AND two different errors in one period (xrun, then suspend) */
+  memset (&f, 0, sizeof f); f.recover_ok = 1; f.max_chunk = 64;
+  f.err_at[0] = 128; f.err[0] = -EPIPE; f.err_at[1] = 640; f.err[1] = -ESTRPIPE; f.nerr = 2;
+  pcm_case ("partial+xrun+suspend", &f, 0, 1);
+  CHECK (f.r.recov == 2 && f.r.xruns == 1, "partial+xrun+suspend: 2 recoveries, 1 xrun");
+  /* 6. back-to-back errors with no progress, then success */
+  memset (&f, 0, sizeof f); f.recover_ok = 1;
+  f.err_at[0] = 100; f.err[0] = -EPIPE; f.err_at[1] = 100; f.err[1] = -EPIPE; f.err_at[2] = 100; f.err[2] = -EINTR; f.nerr = 3;
+  pcm_case ("repeated-errors", &f, 0, 1);
+  /* 7. -EAGAIN and 0-frame returns are waits, not data loss and not busy loops */
+  memset (&f, 0, sizeof f); f.recover_ok = 1; f.eagain_left = 5; f.zero_left = 5;
+  pcm_case ("eagain+zero", &f, 0, 1);
+  CHECK (f.r.stalls == 10, "eagain+zero: %llu stalls counted (want 10)", (unsigned long long) f.r.stalls);
+  /* 8. recovery that never works: gives up after ODY_PCM_MAX_STUCK, keeps prefix intact, sets fatal */
+  memset (&f, 0, sizeof f); f.recover_ok = 0;
+  f.err_at[0] = 300; f.err[0] = -EPIPE; f.err_at[1] = 300; f.err[1] = -EPIPE;
+  f.nerr = 2;
+  /* only two scripted errors: after them the fake accepts data, so this one completes */
+  pcm_case ("recover-fails-but-device-ok", &f, 0, 1);
+  CHECK (f.r.recfail == 2, "recover-fails: 2 recovery_failures counted");
+  /* 9. dead device: every write fails, recovery fails: bounded, reports fatal */
+  memset (&f, 0, sizeof f); f.recover_ok = 0; f.always_fail_write = 1;
+  pcm_case ("dead-device", &f, -1, 0);
+  CHECK (f.r.fatal == EIO, "dead-device: fatal errno %d (want EIO)", f.r.fatal);
+  CHECK (f.got_frames == 0, "dead-device: nothing delivered");
+  /* 10. a device that is only ever EAGAIN also terminates */
+  memset (&f, 0, sizeof f); f.recover_ok = 1; f.eagain_left = 1000000;
+  pcm_case ("eagain-forever", &f, -1, 0);
+  CHECK (f.r.fatal == EAGAIN, "eagain-forever: fatal EAGAIN");
+  /* 11. stop flag abandons the remainder and says so */
+  {
+    static const ody_pcm_ops_t ops = { fd_writei, fd_recover, fd_idle };
+    int16_t src[PF * 2] = { 0 };
+    ody_pcm_stats_t st;
+    _Atomic int stop;
+    memset (&f, 0, sizeof f); f.recover_ok = 1; f.ch = 2; f.cap = PF * 2; f.max_chunk = 100;
+    f.got = calloc (f.cap * 2, sizeof (int16_t));
+    memset (&st, 0, sizeof st);
+    atomic_init (&stop, 1);                                   /* already stopping */
+    CHECK (ody_pcm_write_all (&ops, &f, src, PF, 2, &st, &stop) == 1, "stop: rc 1");
+    CHECK (atomic_load (&st.frames_abandoned) == PF && f.got_frames == 0, "stop: nothing written, %d abandoned", PF);
+    free (f.got);
+  }
 }
 
 static void
@@ -866,6 +1079,8 @@ main (void)
   run_stream ("blocking-producer ring 64 ", 64, 3000000, 1);
   run_stream ("blocking-producer ring 4096", 4096, 3000000, 1);
   run_stream ("dropping-producer ring 64  ", 64, 3000000, 0);
+  printf ("test_rt: control read-back API\n"); test_readback ();
+  printf ("test_rt: device write loop (partial writes, xrun recovery, errors)\n"); test_pcm_write_all ();
   printf ("test_rt: control changes while running\n"); test_controls_while_running ();
   printf ("test_rt: timed mode (cycle-stamped playback)\n"); test_timed (); test_timed_threads ();
   printf ("test_rt: paced device-emulation backend (real thread, wall clock)\n"); test_paced_backend ();

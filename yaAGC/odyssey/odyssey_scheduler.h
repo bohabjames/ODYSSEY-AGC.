@@ -80,5 +80,12 @@ uint64_t odyssey_scheduler_run (odyssey_scheduler_t *s, uint64_t total);
 /* Reset ONE computer (power-on) and its capture bookkeeping; the other is
  * not touched.  Returns 0 or the odyssey_computer_reset() error. */
 int  odyssey_scheduler_reset_computer (odyssey_scheduler_t *s, int id);
+/* Audio effect of a reset (M8, docs/AUDIO-ENGINE.md "Reset semantics"): call it
+ * only on the scheduler thread BETWEEN rounds.  The computer's CycleCounter
+ * restarts at 0, but the stamps delivered to the audio sink stay on the
+ * scheduler timeline (reset time + local cycle, never backwards), one rest
+ * sample (ODY_SEQ_REST, PCM 0) is delivered at the reset time, samples already
+ * queued play out, and the other computer, the mixer and the counters are not
+ * touched.  CSV logs keep the computer's own CycleCounter. */
 
 #endif /* ODYSSEY_SCHEDULER_H */

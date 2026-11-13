@@ -118,5 +118,7 @@ odyssey_scheduler_reset_computer (odyssey_scheduler_t *s, int id)
   if (rc != 0)
     return rc;
   ody_capture_reset (&s->capture[id]);
+  /* the computer's CycleCounter restarted at 0 but the audio timeline did not */
+  ody_capture_rebase (&s->capture[id], s->cycles, (uint8_t) id);
   return 0;
 }

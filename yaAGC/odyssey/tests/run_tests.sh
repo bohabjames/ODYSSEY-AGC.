@@ -316,6 +316,10 @@ done
 
 echo "== milestone 8 phase 1: real-time audio engine =="
 check "rt core + paced backend unit/stress tests (test_rt: ring, mixer, controls, underruns, threads)" "$build/test_rt"
+check "reset semantics for queued audio (test_rt_reset: stamps stay monotonic, rest sample, LGC untouched)" "$build/test_rt_reset" "$roms"
+check "real alsa backend code vs a FAKE libasound (test_alsa_fake: partial writes, xrun recovery, dead device)" "$build/test_alsa_fake"
+check "GUI/engine boundary checker flags ring and producer/consumer access (selftest)" tests/check_gui_api.sh --selftest
+check "GUI-facing sources (if any) use only the control/monitoring API" tests/check_gui_api.sh
 
 # The callback must not call anything: no allocation, locks, stdio, syscalls.  Only the
 # compiler's stack-protector abort path is allowed.  (Skipped under sanitizers, which
@@ -413,6 +417,8 @@ t1=$(date +%s.%N)
 el=$(python3 -c "print(round($t1-$t0,2))")
 check "scheduler paced to the wall clock: 2.0 AGC-seconds took >= 1.9 s real (took $el s)" python3 -c "import sys; sys.exit(0 if $t1-$t0 >= 1.9 else 1)"
 gt "audio callback ran (periods)" "$(stat "$tmp/rt_paced.stats" audio_periods)" 300
+eq "paced run: device health (no write errors, not fatal)" "$(stat "$tmp/rt_paced.stats" audio_device_write_errors)/$(stat "$tmp/rt_paced.stats" audio_device_fatal)" "0/0"
+eq "paced run: every rendered frame reached the emulated device" "$(stat "$tmp/rt_paced.stats" audio_device_frames_written)" "$(stat "$tmp/rt_paced.stats" audio_rendered_frames)"
 eq "paced run: no overruns/dropped samples" "$(stat "$tmp/rt_paced.stats" audio_cmc_dropped)$(stat "$tmp/rt_paced.stats" audio_lgc_dropped)" "00"
 eq "paced run: underruns (cushioned by prefill; wall-clock dependent)" "$(stat "$tmp/rt_paced.stats" audio_cmc_underrun_frames)$(stat "$tmp/rt_paced.stats" audio_lgc_underrun_frames)" "00"
 check "paced WAV is a valid 16-bit stereo 48 kHz file holding every rendered period and real sound" python3 -I -c "
@@ -427,10 +433,19 @@ eq "worst callback is far inside the 5.3 ms period (< 1 ms)" "$([ "$(stat "$tmp/
 echo "-- paced TIMED mode --"
 "$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --bus --cycles 170666 --slice 1000 \
   --realtime --audio-backend paced --audio-device "$tmp/rt_timed.wav" --audio-latency-ms 50 --audio-period 256 > "$tmp/rt_timed.stats"
-eq "paced TIMED run (latency 50 ms): no underruns, no drops, 96000 frames" "$(stat "$tmp/rt_timed.stats" audio_cmc_underrun_frames)/$(stat "$tmp/rt_timed.stats" audio_lgc_underrun_frames)/$(stat "$tmp/rt_timed.stats" audio_cmc_dropped)/$(stat "$tmp/rt_timed.stats" audio_lgc_dropped)/$(stat "$tmp/rt_timed.stats" audio_rendered_frames)" "0/0/0/0/96000"
-check "paced TIMED WAV holds real sound" python3 -I -c "
+eq "paced TIMED run (latency 50 ms): no underruns, no drops" "$(stat "$tmp/rt_timed.stats" audio_cmc_underrun_frames)/$(stat "$tmp/rt_timed.stats" audio_lgc_underrun_frames)/$(stat "$tmp/rt_timed.stats" audio_cmc_dropped)/$(stat "$tmp/rt_timed.stats" audio_lgc_dropped)" "0/0/0/0"
+# The paced thread renders one 256-frame period per wall-clock tick until stopped, so a
+# 2.0 AGC-second run is 375 periods (96000 frames) plus at most one more if the run
+# overshoots 2.0 s by a hair under load (seen once, right after a clean build).  The
+# exact count is therefore an artefact of the wall clock; what must hold is: period
+# aligned, within one period of nominal, and the WAV holds every rendered frame.
+check "paced TIMED rendered frames: period-aligned, 96000 (+ at most one period of wall-clock overshoot)" python3 -I -c "
+n=$(stat "$tmp/rt_timed.stats" audio_rendered_frames)
+import sys; sys.exit(0 if n%256==0 and 96000<=n<=96000+256 else 1)"
+check "paced TIMED WAV holds every rendered frame and real sound" python3 -I -c "
 import wave,sys
-w=wave.open('$tmp/rt_timed.wav','rb'); d=w.readframes(w.getnframes()); sys.exit(0 if any(d) and w.getnframes()==96000 else 1)"
+w=wave.open('$tmp/rt_timed.wav','rb'); d=w.readframes(w.getnframes())
+sys.exit(0 if any(d) and w.getnframes()==$(stat "$tmp/rt_timed.stats" audio_rendered_frames) else 1)"
 
 echo "-- backend / option errors --"
 "$host" --cmc-rom "$roms/SYNTH-CMC.bin" --lgc-rom "$roms/SYNTH-LGC.bin" --cycles 1000 --audio-backend alsa > "$tmp/alsa.out" 2> "$tmp/alsa.err"

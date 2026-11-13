@@ -27,6 +27,22 @@ ody_capture_reset (ody_capture_t *cap)
 }
 
 void
+ody_capture_rebase (ody_capture_t *cap, uint64_t timeline_cycle, uint8_t computer)
+{
+  cap->cycle_base = timeline_cycle;
+  if (cap->sink != NULL)
+    {
+      ody_sample_t rest;
+      memset (&rest, 0, sizeof rest);
+      rest.cycle = timeline_cycle;
+      rest.seq = ODY_SEQ_REST;
+      rest.word = 0;
+      rest.computer = computer;
+      cap->sink (cap->sink_ctx, &rest);
+    }
+}
+
+void
 ody_capture_drain (ody_capture_t *cap, odyssey_computer_t *c)
 {
   ody_sample_t s;
@@ -58,7 +74,11 @@ ody_capture_drain (ody_capture_t *cap, odyssey_computer_t *c)
       cap->have_prev = 1;
       cap->samples++;
       if (cap->sink != NULL)
-        cap->sink (cap->sink_ctx, &s);
+        {
+          ody_sample_t t = s;
+          t.cycle += cap->cycle_base;
+          cap->sink (cap->sink_ctx, &t);
+        }
 
       if (cap->csv != NULL)
         fprintf (cap->csv, "%" PRIu32 ",%" PRIu64 ",%05o,%d,%d\n", s.seq,

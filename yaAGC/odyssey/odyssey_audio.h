@@ -25,14 +25,11 @@ typedef struct
   uint8_t reserved;
 } ody_sample_t;
 
-/* Fixed-capacity ring.  Single producer (the AGC channel callback), single
- * consumer (the drain/mixer side).  Today both run on one host thread, so no
- * atomics are used; if the audio callback ever drains on another thread,
- * head/tail MUST become C11 atomics with acquire/release ordering.  (That is
- * a documented TODO for milestone 8, not an implemented guarantee.)
- * M8 NOTE: this queue stays single-thread by design.  The cross-thread path is
- * the separate atomic PCM ring in odyssey_rt.[ch]; the capture sink copies
- * samples from here into it. */
+/* Fixed-capacity ring between the AGC channel callback (producer) and the
+ * capture drain (consumer).  BOTH run on the scheduler thread, so this queue
+ * deliberately uses NO atomics: it must never be shared with another thread.
+ * The only cross-thread audio path is the separate atomic SPSC PCM ring in
+ * odyssey_rt.[ch]; the capture sink copies samples from here into it. */
 typedef struct
 {
   ody_sample_t *slots;

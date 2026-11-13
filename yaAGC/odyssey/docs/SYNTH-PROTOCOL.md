@@ -68,5 +68,9 @@ sample index, not absolute cycle, after that point.
 * Bus delivery is once per scheduler round, so the slice size changes message
   latency in cycles (and thus the audio after the first message). Exactness is
   verified at each slice against the model, not equality across slices.
-* Sample rates are measured per run, not guaranteed; no real-time claim (M8).
-* Single-threaded only.
+* Sample rates are measured per run, not guaranteed. Real-time playback of these
+  programs is M8 (`AUDIO-ENGINE.md`); it makes no rate or latency guarantee.
+* The programs run inside the scheduler, which is single-threaded: both AGCs, the bus
+  and sample capture share one thread. In M8 the only other thread is the audio
+  callback, which never touches the computers or the bus; it reads PCM from SPSC
+  rings. (M7 itself was single-threaded; the playback path is M8.)
